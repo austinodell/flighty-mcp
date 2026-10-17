@@ -1,0 +1,17 @@
+services:
+  flighty-mcp:
+    image: ghcr.io/swiftyspiffy/flighty-mcp:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      FLIGHTY_ALLOW_WRITES: ${FLIGHTY_ALLOW_WRITES:-true}
+      FLIGHTY_ALLOW_ACCOUNT_DELETION: ${FLIGHTY_ALLOW_ACCOUNT_DELETION:-false}
+      FLIGHTY_BUILD_TOKEN: ${FLIGHTY_BUILD_TOKEN:-}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
