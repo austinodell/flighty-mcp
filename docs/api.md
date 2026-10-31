@@ -49,8 +49,9 @@ in-memory snapshot and still decodes a single page at a time.
 
 The stream includes reference catalogs, other accessible users, updates and
 pre-existing deletion markers. Flight identity is **(userId, flightId)**, not
-flightId alone. Listing tools select this account's records, prefer newer updates
-and exclude deletion markers by default. Receiving a deletion marker never
+flightId alone. `list_flights` with `mine_only=false` includes tracked and friends'
+flights; `mine_only=true` keeps this account's My Flights. Listings prefer newer
+updates and exclude deletion markers. Receiving a deletion marker never
 causes this client to send a deletion. `get_account_records` exposes all supported
 categories, redacting credentials. Its flight categories also restrict ownership.
 
