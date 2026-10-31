@@ -1,4 +1,24 @@
-{ "name": "flighty-mcp", "version": "0.2.0", "type": "module", "private": true,
-  "scripts": { "build": "wrangler deploy --dry-run --outdir dist", "deploy": "wrangler deploy", "dev": "wrangler dev", "typecheck": "tsc --noEmit", "test": "node --test --test-concurrency=1 test/*.test.mjs" },
-  "dependencies": { "@bufbuild/protobuf": "^2.2.0", "@modelcontextprotocol/sdk": "^1.24.0", "zod": "^3.25.0" },
-  "devDependencies": { "wrangler": "^4", "@cloudflare/workers-types": "^5", "typescript": "^5" } }
+{
+  "name": "flighty-mcp",
+  "version": "0.3.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0",
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/sdk": "^1.24.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5",
+    "typescript": "^5",
+    "wrangler": "^4"
+  }
+}

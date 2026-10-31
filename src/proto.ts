@@ -185,12 +185,35 @@ export function decode(name: string, data: Uint8Array): Record<string, any> {
   return asDict(parse(name, data));
 }
 
-export function unknownFieldsPresent(parsed: { schema: DescMessage; message: Message }): boolean {
-  const known = toBinary(parsed.schema, parsed.message, { writeUnknownFields: false });
-  const all = toBinary(parsed.schema, parsed.message);
-  if (known.length !== all.length) return true;
-  for (let i = 0; i < known.length; i++) if (known[i] !== all[i]) return true;
+function messageHasUnknown(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => messageHasUnknown(item, seen));
+  const unknown = (value as { $unknown?: unknown }).$unknown;
+  if (Array.isArray(unknown) && unknown.length > 0) return true;
+  for (const key of Object.keys(value)) {
+    if (key === '$unknown' || key === '$typeName') continue;
+    if (messageHasUnknown((value as Record<string, unknown>)[key], seen)) return true;
+  }
   return false;
+}
+
+/** Detect unknown fields from the parsed message instead of re-encoding it twice. */
+export function unknownFieldsPresent(parsed: { schema: DescMessage; message: Message }): boolean {
+  return messageHasUnknown(parsed.message);
+}
+
+/**
+ * ProtoJSON for one response. The protobuf message, including any unknown-field
+ * bytes, is not returned and can be collected before the next page is fetched.
+ */
+export function decodeReleased(name: string, data: Uint8Array): { value: Record<string, any>; unknownFields: boolean } {
+  const schema = messageSchema(name);
+  const message = fromBinary(schema, data, { readUnknownFields: true });
+  const unknownFields = messageHasUnknown(message);
+  const value = redact(toJson(schema, message, { registry: registry() }) as Record<string, any>);
+  return { value, unknownFields };
 }
 
 /** Expose the exact supported request/response field contract to an MCP client. */
