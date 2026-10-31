@@ -141,6 +141,12 @@ export class FlightyClient {
     return true;
   }
 
+  /** In-memory snapshot from this isolate, without starting a download. */
+  async peekSnapshot(token: string): Promise<Snapshot | null> {
+    const cached = CACHE.get(await sha256(validateToken(token)));
+    return cached ? cached.clone() : null;
+  }
+
   async invalidate(token: string): Promise<void> {
     CACHE.delete(await sha256(token));
     const store = this.repository();

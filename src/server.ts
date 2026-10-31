@@ -72,7 +72,7 @@ export function createServer(resolveToken: () => string): McpServer {
 
   tool(
     'list_flights',
-    'List this account\'s current flights from the cached snapshot, including archived history, manual flights, and flights this account tracks. Excludes server deletion markers and other owners\' flight records. mine_only keeps flights marked My Flights. Date filters are YYYY-MM-DD in the departure airport\'s local timezone. Airport filters accept IATA, name or ID text. Sorted by departure time, earliest first. The cache object includes cache_age_seconds and last_refreshed. refresh=true starts a sync; within 60 seconds it reuses the last complete snapshot. limit 1..200. details=true also includes the full decoded user-flight record. If the cache is empty, call refresh_cache.',
+    'List flights from the cached snapshot. mine_only=true returns only this account\'s My Flights. mine_only=false (default) also returns flights this account tracks and friends\' flights. Each row has owner_user_id, owner_name, friend_id, shared, and relationship (mine, tracked, or friend). Excludes server deletion markers. Date filters are YYYY-MM-DD in the departure airport\'s local timezone. Airport filters accept IATA, name or ID text. Sorted by departure time, earliest first. The cache object includes cache_age_seconds and last_refreshed. refresh=true starts a sync; within 60 seconds it reuses the last complete snapshot. limit 1..200. details=true also includes the full decoded user-flight record. If the cache is empty, call refresh_cache.',
     z.object({
       when: z.enum(['all', 'upcoming', 'past']).default('all'),
       mine_only: z.boolean().default(false),
@@ -163,10 +163,10 @@ export function createServer(resolveToken: () => string): McpServer {
 
   tool(
     'get_flight',
-    'Fetch a flight by UUID using the app\'s GET /v1/flight/{id} sharing/details response. Does not add the flight. Returns allFlights, traveler profiles, manualFlights and airport-status data when supplied by the server; account tokens are redacted.',
+    'Fetch a flight by UUID. Flights in the account cache, including tracked and friends\' flights, are returned from the cache with owner_name, friend_id, shared, and relationship. A flight that is not in the cache uses the app\'s GET /v1/flight/{id} sharing/details response and does not add the flight. Account tokens are redacted.',
     z.object({ flight_id: z.string() }),
     READ,
-    (input) => api.request('get_flight', resolveToken(), { path: { flight_id: input.flight_id } }),
+    (input) => service.getFlight(resolveToken(), input.flight_id),
   );
 
   tool(

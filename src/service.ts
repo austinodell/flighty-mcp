@@ -76,6 +76,10 @@ export function flightSummary(record: Json, snapshot: Snapshot, manual = false):
     canceled: flight.isCanceled ?? false,
     archived: record.archived ?? false,
     is_mine: record.isMine ?? false,
+    owner_name: ownerName(record.userId ?? null, snapshot),
+    friend_id: record.userId && record.userId !== snapshot.accountId ? record.userId : null,
+    shared: isSharedFlight(record),
+    relationship: record.userId && record.userId !== snapshot.accountId ? 'friend' : record.isMine ? 'mine' : 'tracked',
     distance_km: flight.distance ?? flight.distanceKm ?? null,
     equipment: flight.equipment ?? null,
     updated: record.updated ?? null,
@@ -112,6 +116,29 @@ function cacheFromView(view: CacheView): Json {
     continuation: view.continuation,
     last_error: view.last_error,
   };
+}
+
+function profileName(profile: Json | null | undefined): string | null {
+  if (!profile || typeof profile !== 'object') return null;
+  if (typeof profile.fullName === 'string' && profile.fullName) return profile.fullName;
+  if (typeof profile.firstName === 'string' && profile.firstName) return profile.firstName;
+  return null;
+}
+
+function ownerName(userId: string | null, snapshot: Snapshot): string | null {
+  if (!userId) return null;
+  const profile = snapshot.items('remoteProfile').find((item) => item.id === userId || item.userId === userId);
+  const named = profileName(profile);
+  if (named) return named;
+  for (const relationship of snapshot.items('remoteConnectedFriendRelationship')) {
+    if (relationship.senderUserId === userId) return profileName(relationship.senderProfile) ?? relationship.senderFirstName ?? null;
+    if (relationship.receiverUserId === userId) return profileName(relationship.receiverProfile) ?? relationship.receiverFirstName ?? null;
+  }
+  return null;
+}
+
+function isSharedFlight(record: Json): boolean {
+  return record.importSource === 'SHARED_WITH_YOU' || record.importSource === 'CONNECTED_FRIEND' || Boolean(record.sharingUrl);
 }
 
 function catalogIds(record: Json, manual: boolean): { airports: string[]; airlines: string[] } {
@@ -235,13 +262,20 @@ export class FlightyService {
     if (start_date && end_date && start_date > end_date) throw new FlightyError('start_date must not follow end_date.');
     const loaded = await this.flightSnapshot(token, refresh);
     const snapshot = loaded.snapshot;
-    const normal: [Json, boolean][] = [
-      ...snapshot.owned('remoteUserFlight').map((record): [Json, boolean] => [record, false]),
-      ...snapshot.owned('remoteUserManualFlight').map((record): [Json, boolean] => [record, true]),
-    ];
+    // mine_only keeps this account's My Flights. The default also returns flights this
+    // account tracks and flights synced from friends.
+    const sources = mine_only
+      ? [
+          ...snapshot.owned('remoteUserFlight').map((record): [Json, boolean] => [record, false]),
+          ...snapshot.owned('remoteUserManualFlight').map((record): [Json, boolean] => [record, true]),
+        ]
+      : [
+          ...snapshot.items('remoteUserFlight').map((record): [Json, boolean] => [record, false]),
+          ...snapshot.items('remoteUserManualFlight').map((record): [Json, boolean] => [record, true]),
+        ];
     const found: Json[] = [];
     const now = Date.now();
-    for (const [record, manual] of normal) {
+    for (const [record, manual] of sources) {
       const summary = flightSummary(record, snapshot, manual);
       const dep = summary.departure_scheduled;
       const depTime = dep ? timestamp(dep) : null;
@@ -283,8 +317,10 @@ export class FlightyService {
     }
     const refreshed = refresh ? await this.refreshCache(token, { refresh: true }) : null;
     const meta = await this.readyMeta(store, token);
-    const flights = await store.payloads(meta.account_id, meta.generation, 'remoteUserFlight', { userId: meta.account_id });
-    const manuals = await store.payloads(meta.account_id, meta.generation, 'remoteUserManualFlight', { userId: meta.account_id });
+    const flights = await store.payloads(meta.account_id, meta.generation, 'remoteUserFlight');
+    const manuals = await store.payloads(meta.account_id, meta.generation, 'remoteUserManualFlight');
+    const profiles = await store.payloads(meta.account_id, meta.generation, 'remoteProfile');
+    const friends = await store.payloads(meta.account_id, meta.generation, 'remoteConnectedFriendRelationship');
     const airportIds: string[] = [];
     const airlineIds: string[] = [];
     for (const record of flights) {
@@ -301,7 +337,14 @@ export class FlightyService {
     const airlines = await store.payloadsByIds(meta.account_id, meta.generation, 'remoteAirline', airlineIds);
     const snapshot = new Snapshot(
       meta.account_id,
-      { remoteUserFlight: flights, remoteUserManualFlight: manuals, remoteAirport: airports, remoteAirline: airlines },
+      {
+        remoteUserFlight: flights,
+        remoteUserManualFlight: manuals,
+        remoteAirport: airports,
+        remoteAirline: airlines,
+        remoteProfile: profiles,
+        remoteConnectedFriendRelationship: friends,
+      },
       meta.pages,
       meta.fetched_at ?? utcNow(),
       meta.stored_at ?? Date.now(),
@@ -309,6 +352,46 @@ export class FlightyService {
     );
     snapshot.refreshLimited = Boolean(refreshed?.refresh_limited);
     return { snapshot, cache: cacheFromView(viewFromMeta(meta, { refresh_limited: snapshot.refreshLimited })) };
+  }
+
+  /** Cached account flights for this id, including tracked and friends' copies. Does not download. */
+  private async cachedFlights(token: string, flightId: string): Promise<{ flights: Json[]; cache: Json } | null> {
+    const store = this.store();
+    let snapshot: Snapshot;
+    let cache: Json;
+    if (store) {
+      try {
+        const loaded = await this.flightSnapshot(token, false);
+        snapshot = loaded.snapshot;
+        cache = loaded.cache;
+      } catch (error) {
+        if (error instanceof FlightyError && /cache is empty|in progress/.test(error.message)) return null;
+        throw error;
+      }
+    } else {
+      const peeked = await this.client.peekSnapshot(token);
+      if (!peeked) return null;
+      snapshot = peeked;
+      cache = cacheInfo(peeked);
+    }
+    const rows: [Json, boolean][] = [
+      ...snapshot.items('remoteUserFlight').map((record): [Json, boolean] => [record, false]),
+      ...snapshot.items('remoteUserManualFlight').map((record): [Json, boolean] => [record, true]),
+    ];
+    const flights = rows
+      .filter(([record, manual]) => {
+        const flight: Json = manual ? record : record.flight ?? {};
+        return record.id === flightId || flight.id === flightId;
+      })
+      .map(([record, manual]) => flightSummary(record, snapshot, manual));
+    return flights.length ? { flights, cache } : null;
+  }
+
+  async getFlight(token: string, flightId: string): Promise<Json> {
+    uuidText(flightId);
+    const cached = await this.cachedFlights(token, flightId);
+    if (cached) return { source: 'cache', flight_id: flightId, flights: cached.flights, cache: cached.cache };
+    return this.client.request('get_flight', token, { path: { flight_id: flightId } });
   }
 
   async accountRecords(token: string, kind: string, opts: { limit?: number; offset?: number; refresh?: boolean } = {}): Promise<Json> {

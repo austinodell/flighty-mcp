@@ -423,22 +423,30 @@ test('fresh-for-write requires write permission and bypasses cache', async () =>
 
 // ---- service ----
 
-test('listing excludes other owners and deleted but keeps archived', async () => {
+test('listing keeps friends and archived flights and drops deletions', async () => {
   mockFetch([syncRoute(syncBody([
-    flightRecord(OTHER),
+    flightRecord(OTHER, SECOND_FLIGHT, { importSource: 'CONNECTED_FRIEND' }),
     flightRecord(OWNER, FLIGHT, { archived: true }),
-    flightRecord(OWNER, SECOND_FLIGHT, { deleted: '2000-01-01T00:00:00Z' }),
+    flightRecord(OWNER, '10000000-0000-4000-8000-000000000003', { deleted: '2000-01-01T00:00:00Z' }),
   ]))]);
-  const result = await new FlightyService(reader()).listFlights(TOKEN);
-  assert.equal(result.total, 1);
-  const [row] = result.flights;
-  assert.equal(row.owner_user_id, OWNER);
-  assert.equal(row.archived, true);
-  assert.equal(row.flight_number, 'ZZ 123');
-  assert.equal(row.origin.iata, 'AAA');
-  assert.equal(row.destination.iata, 'BBB');
-  assert.equal(row.departure_local, '2099-01-02T12:00:00-08:00');
-  assert.equal(row.arrival_local, '2099-01-03T01:00:00+00:00');
+  const service = new FlightyService(reader());
+  const result = await service.listFlights(TOKEN);
+  assert.equal(result.total, 2);
+  const own = result.flights.find((flight) => flight.owner_user_id === OWNER);
+  const friend = result.flights.find((flight) => flight.owner_user_id === OTHER);
+  assert.equal(own.archived, true);
+  assert.equal(own.relationship, 'mine');
+  assert.equal(own.friend_id, null);
+  assert.equal(own.shared, false);
+  assert.equal(own.flight_number, 'ZZ 123');
+  assert.equal(own.origin.iata, 'AAA');
+  assert.equal(own.destination.iata, 'BBB');
+  assert.equal(own.departure_local, '2099-01-02T12:00:00-08:00');
+  assert.equal(own.arrival_local, '2099-01-03T01:00:00+00:00');
+  assert.equal(friend.friend_id, OTHER);
+  assert.equal(friend.relationship, 'friend');
+  assert.equal(friend.shared, true);
+  assert.equal((await service.listFlights(TOKEN, { mine_only: true })).total, 1);
 });
 
 test('local date and airport filters', async () => {
@@ -483,6 +491,49 @@ test('catalog search and account records', async () => {
   assert.equal((await service.searchCatalog(TOKEN, 'remoteAirport', '')).total, 2);
   assert.equal((await service.accountRecords(TOKEN, 'remoteUser')).records[0].token, '[REDACTED]');
   await assert.rejects(service.accountRecords(TOKEN, 'not-a-record'), FlightyError);
+});
+
+test('friends and tracked flights are named and get_flight reads the cache', async () => {
+  const friendId = SECOND_FLIGHT;
+  const trackedId = '10000000-0000-4000-8000-000000000003';
+  const unknownId = '10000000-0000-4000-8000-000000000099';
+  const body = proto.encode('SyncResponseProto', {
+    data: [
+      { remoteAirport: { id: AIRPORT_A, name: 'Example Origin', iata: 'AAA', timezone: 'America/Los_Angeles' } },
+      { remoteAirline: { id: AIRLINE, name: 'Example Air', iata: 'ZZ' } },
+      { remoteProfile: { id: OTHER, fullName: 'Friend Flyer', firstName: 'Friend' } },
+      { remoteConnectedFriendRelationship: { id: 'rel-1', senderUserId: OWNER, receiverUserId: OTHER, receiverFirstName: 'Fallback', senderFirstName: 'Owner' } },
+      { remoteUserFlight: flightRecord(OWNER, FLIGHT, { isMine: true }) },
+      { remoteUserFlight: flightRecord(OWNER, trackedId, { isMine: false }) },
+      { remoteUserFlight: flightRecord(OTHER, friendId, { isMine: false, importSource: 'SHARED_WITH_YOU', sharingUrl: 'https://live.flighty.app/s/example' }) },
+    ],
+    pagination: { moreData: false },
+  });
+  const calls = mockFetch([
+    syncRoute(body),
+    ['GET', `${API}/v1/flight/${unknownId}`, () => protoResponse(proto.encode('GetSharingLinkResponseProto', {}))],
+  ]);
+  const service = new FlightyService(reader());
+  const listed = await service.listFlights(TOKEN);
+  assert.equal(listed.total, 3);
+  const friend = listed.flights.find((flight) => flight.id === friendId);
+  const tracked = listed.flights.find((flight) => flight.id === trackedId);
+  assert.equal(friend.owner_name, 'Friend Flyer');
+  assert.equal(friend.friend_id, OTHER);
+  assert.equal(friend.shared, true);
+  assert.equal(friend.relationship, 'friend');
+  assert.equal(tracked.relationship, 'tracked');
+  assert.equal(tracked.friend_id, null);
+  assert.equal(tracked.shared, false);
+  assert.equal((await service.listFlights(TOKEN, { mine_only: true })).flights.map((flight) => flight.id).join(), FLIGHT);
+  const before = calls.length;
+  const cached = await service.getFlight(TOKEN, friendId);
+  assert.equal(calls.length, before);
+  assert.equal(cached.source, 'cache');
+  assert.equal(cached.flights[0].friend_id, OTHER);
+  const live = await service.getFlight(TOKEN, unknownId);
+  assert.equal(live.meta.operation, 'get_flight');
+  assert.equal(calls.at(-1).url.pathname, `/v1/flight/${unknownId}`);
 });
 
 test('update_ticket preserves editable fields and drops server metadata', async () => {

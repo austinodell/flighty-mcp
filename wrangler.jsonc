@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "flighty-mcp",
+  "account_id": "d07b110f410fe3016dae9409da71b2ba",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -15,20 +16,19 @@
     "FLIGHTY_ALLOW_WRITES": "true",
     "FLIGHTY_ALLOW_ACCOUNT_DELETION": "false"
   },
-  // Replace database_id after `npx wrangler d1 create flighty-mcp`.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "flighty-mcp",
-      "database_id": "00000000-0000-4000-8000-00000000d1d1",
+      "database_id": "42bfcf77-8ba9-4c1a-b06b-fe443cf62cd1",
       "migrations_dir": "migrations"
     }
   ],
-  // Replace id after `npx wrangler kv namespace create OAUTH_KV`.
+  // Namespace title: flighty-mcp-oauth
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "00000000000000000000000000000000"
+      "id": "014b53be447d41b293d9b4bf74af63bb"
     }
   ],
   "queues": {
@@ -67,5 +67,6 @@
   }
   // Optional secrets: FLIGHTY_BUILD_TOKEN
   // Optional vars: FLIGHTY_LOCALE, FLIGHTY_USER_AGENT, FLIGHTY_DEVICE_ID, FLIGHTY_TIMEOUT, FLIGHTY_CACHE_TTL, FLIGHTY_MAX_PAGES, FLIGHTY_SYNC_PAGES_PER_RUN
-  // MCP_TOKEN is no longer read. Delete it with `npx wrangler secret delete MCP_TOKEN` after cutover.
+  // Queue flighty-mcp-sync (199a638623e4490fabd771415783aa95) is bound by name.
+  // Deploy deletes the unused MCP_TOKEN secret. See .github/workflows/deploy.yml.
 }

@@ -25,49 +25,53 @@ remaining pages continue as Queue messages, one page per invocation. The publish
 generation flips only after the last page, so a crash cannot replace a good snapshot
 with a partial one. Cron `0 * * * *` enqueues that refresh every hour.
 
-Tracked flights and friends' flights are stored. `list_flights` and flight
-`get_account_records` still return only this account's records.
+Tracked flights and friends' flights are stored. `list_flights` with
+`mine_only=false` returns them, with `owner_name`, `friend_id`, `shared`, and
+`relationship`. `mine_only=true` stays limited to this account's My Flights.
+`get_flight` serves a cached flight, including a friend's, before calling
+Flighty. `get_account_records` for flight categories stays limited to this account.
 
 ## Deploying
 
-Do these once, in order, before merging to `main`. GitHub Actions
-(`.github/workflows/deploy.yml`) type-checks, tests, applies D1 migrations, and deploys
-on every push to `main`. It does not create the D1 database, KV namespace, or Access
-app. Placeholder IDs in `wrangler.jsonc` will make that deploy fail until they are
-replaced.
+GitHub Actions (`.github/workflows/deploy.yml`) type-checks, tests, applies D1
+migrations, deploys, then deletes the unused `MCP_TOKEN` secret on every push to
+`main`. These resources are already provisioned on account
+`d07b110f410fe3016dae9409da71b2ba` and recorded in `wrangler.jsonc`:
+
+| Binding | Name | ID |
+| --- | --- | --- |
+| `DB` | `flighty-mcp` | `42bfcf77-8ba9-4c1a-b06b-fe443cf62cd1` |
+| `OAUTH_KV` | `flighty-mcp-oauth` | `014b53be447d41b293d9b4bf74af63bb` |
+| `SYNC_QUEUE` | `flighty-mcp-sync` | `199a638623e4490fabd771415783aa95` (bound by queue name) |
+
+`migrations/0001_account_cache.sql` is already applied remotely and recorded in
+`d1_migrations`, so `wrangler d1 migrations apply flighty-mcp --remote` is a no-op
+until a later migration is added. Friends' and tracked flights did not need a new
+table.
 
 The API token used by Wrangler and `CLOUDFLARE_API_TOKEN` needs permission to deploy
 Workers, create a custom hostname on the `odell.io` zone, edit D1, KV, and Queues.
-`odell.io` must be on the same Cloudflare account.
+`odell.io` must be on the same Cloudflare account. `CLOUDFLARE_ACCOUNT_ID` is
+`d07b110f410fe3016dae9409da71b2ba`.
 
 ### 1. D1
 
+Already created. To recreate:
+
 ```bash
 npx wrangler d1 create flighty-mcp
-```
-
-Copy `database_id` into `d1_databases[0].database_id` in `wrangler.jsonc` (replace
-`00000000-0000-4000-8000-00000000d1d1`).
-
-```bash
 npx wrangler d1 migrations apply flighty-mcp --remote
 ```
 
 ### 2. OAuth KV
 
 Workers OAuth Provider stores client registrations, grants, and token state in KV.
-
-```bash
-npx wrangler kv namespace create OAUTH_KV
-```
-
-Copy the namespace id into `kv_namespaces[0].id` (replace the zero id).
+Namespace `flighty-mcp-oauth` already exists (`014b53be447d41b293d9b4bf74af63bb`).
 
 ### 3. Queue
 
-`wrangler deploy` creates the `flighty-mcp-sync` queue from `wrangler.jsonc`. The same
-Worker produces and consumes it (`max_concurrency` 1, one message at a time). No
-separate create command is required.
+`flighty-mcp-sync` already exists. The Worker produces and consumes it
+(`max_concurrency` 1, one message at a time).
 
 ### 4. Custom domain
 
@@ -119,6 +123,10 @@ login is refused.
 
 ### 6. Worker secrets
 
+`FLIGHTY_TOKEN`, `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_TOKEN_URL`,
+`ACCESS_AUTHORIZATION_URL`, `ACCESS_JWKS_URL`, `COOKIE_ENCRYPTION_KEY`, and
+`ACCESS_ALLOWED_EMAIL` are already set on the Worker. To rotate one:
+
 ```bash
 npx wrangler secret put FLIGHTY_TOKEN
 npx wrangler secret put ACCESS_CLIENT_ID
@@ -133,7 +141,7 @@ npx wrangler secret put ACCESS_ALLOWED_EMAIL
 `COOKIE_ENCRYPTION_KEY` is the hex from `openssl rand -hex 32`. It encrypts the OAuth
 consent and upstream-state cookies. Do not commit any of these values.
 
-`MCP_TOKEN` is no longer read. After the Access cutover, remove the old secret:
+`MCP_TOKEN` is no longer read. The deploy workflow runs `wrangler secret delete MCP_TOKEN` after a successful deploy and ignores a secret that is already gone. To remove it yourself:
 
 ```bash
 npx wrangler secret delete MCP_TOKEN
