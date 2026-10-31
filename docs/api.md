@@ -4,7 +4,7 @@ Supported endpoints, request formats and operational limitations.
 
 - [Every ordinary HTTP endpoint and its tool](endpoints.md)
 - [All 43 sync actions and their field tags](sync-actions.md)
-- [`schema.json`](../src/flighty_mcp/data/schema.json): full 281-definition inventory.
+- [`schema.json`](../src/data/schema.json): full 281-definition inventory.
 
 ## Transport
 
@@ -188,8 +188,8 @@ is mocked in the automated suite; it has not been used to validate mutations.
 - Telemetry is not submitted automatically, and devices are not registered automatically.
 - Core flight-management mutations have passed supervised live tests. Social
   features, account deletion and additional account/integration operations have
-  not been live-tested; see [validation status](testing.md#live-validation-status).
+  not been live-tested.
 
 Implementation references: [protobuf ProtoJSON](https://protobuf.dev/programming-guides/json/),
 [protobuf wire encoding](https://protobuf.dev/programming-guides/encoding/), and
-the [official Python MCP SDK](https://github.com/modelcontextprotocol/python-sdk).
+the [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk).

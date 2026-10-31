@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "flighty-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "minify": true,
+  "vars": {
+    "FLIGHTY_ALLOW_WRITES": "true",
+    "FLIGHTY_ALLOW_ACCOUNT_DELETION": "false"
+  }
+  // Secrets (dashboard or `wrangler secret put`, never in this file):
+  // MCP_TOKEN, FLIGHTY_TOKEN, optional FLIGHTY_BUILD_TOKEN
+  // Optional vars: FLIGHTY_LOCALE, FLIGHTY_USER_AGENT, FLIGHTY_DEVICE_ID, FLIGHTY_TIMEOUT, FLIGHTY_CACHE_TTL, FLIGHTY_MAX_PAGES
+}
