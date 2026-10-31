@@ -1,70 +1,185 @@
-# ✈️ flighty-mcp (Cloudflare Workers)
+# flighty-mcp (Cloudflare Workers)
 
-An unofficial MCP server for [Flighty](https://flighty.com), ported to TypeScript and
-hosted as a remote MCP server on Cloudflare Workers. Forked from
-[swiftyspiffy/flighty-mcp](https://github.com/swiftyspiffy/flighty-mcp) (Python).
-Clients call `POST /mcp` with `Authorization: Bearer <MCP_TOKEN>`.
+An unofficial MCP server for [Flighty](https://flighty.com), hosted as a remote MCP server on
+Cloudflare Workers. Forked from [swiftyspiffy/flighty-mcp](https://github.com/swiftyspiffy/flighty-mcp).
 
-Let your AI assistant read your flights, search schedules and airports, and manage
-your tracked flights. Flighty does not need to be open; the Worker talks directly to
-Flighty's API with your account token.
+Clients connect to `https://flight-mcp.odell.io/mcp` and sign in with Cloudflare Access.
+The Worker does not accept a static `MCP_TOKEN` bearer. `FLIGHTY_TOKEN` is still the upstream
+Flighty credential. A client may send `X-Flighty-Token` to use a different Flighty account
+than the one in that secret.
 
 Not affiliated with or endorsed by Flighty. **Adding and editing are enabled by
 default. Account deletion is disabled.**
 
-## Deploying on Cloudflare
+## Why the account cache exists
 
-### Workers Builds
+A full Flighty sync is several protobuf pages. Decoding every page with
+`@bufbuild/protobuf` while retaining raw bytes, unknown fields, ProtoJSON copies, and a
+cloned snapshot exceeds the Workers **128 MB** isolate memory limit (error 1102) even
+when CPU time stays well under the 30 second Paid-plan limit.
 
-Connect this repo in Cloudflare Workers Builds with:
+Reads (`list_flights`, `get_account_records`, catalog search, `sync_account`) are served
+from D1. A refresh decodes **one page at a time**, writes the trimmed records, drops the
+protobuf message and raw bytes, and checkpoints the cursor. The default account's
+remaining pages continue as Queue messages, one page per invocation. The published
+generation flips only after the last page, so a crash cannot replace a good snapshot
+with a partial one. Cron `0 * * * *` enqueues that refresh every hour.
 
-- Root directory: `/`
-- Build command: `npm install`
-- Deploy command: `npx wrangler deploy`
+Tracked flights and friends' flights are stored. `list_flights` and flight
+`get_account_records` still return only this account's records.
 
-No KV or other bindings are needed. The account snapshot cache lives in memory per
-Worker isolate. Do not commit secrets.
+## Deploying
 
-Set the Worker secrets in the dashboard, or locally with:
+Do these once, in order, before merging to `main`. GitHub Actions
+(`.github/workflows/deploy.yml`) type-checks, tests, applies D1 migrations, and deploys
+on every push to `main`. It does not create the D1 database, KV namespace, or Access
+app. Placeholder IDs in `wrangler.jsonc` will make that deploy fail until they are
+replaced.
+
+The API token used by Wrangler and `CLOUDFLARE_API_TOKEN` needs permission to deploy
+Workers, create a custom hostname on the `odell.io` zone, edit D1, KV, and Queues.
+`odell.io` must be on the same Cloudflare account.
+
+### 1. D1
 
 ```bash
-npx wrangler secret put MCP_TOKEN        # bearer token your MCP clients send
-npx wrangler secret put FLIGHTY_TOKEN    # your Flighty account token (see below)
+npx wrangler d1 create flighty-mcp
 ```
 
-`MCP_TOKEN` gates access to the Worker. `FLIGHTY_TOKEN` is the Flighty credential the
-Worker uses upstream. A client may instead send its own Flighty token in an
-`X-Flighty-Token` header, which overrides the secret. That lets one deployment serve
-several accounts.
+Copy `database_id` into `d1_databases[0].database_id` in `wrangler.jsonc` (replace
+`00000000-0000-4000-8000-00000000d1d1`).
 
-### GitHub Actions
+```bash
+npx wrangler d1 migrations apply flighty-mcp --remote
+```
 
-`.github/workflows/deploy.yml` type-checks, tests and deploys on every push to `main`
-and when run manually (`workflow_dispatch`). Add these repository secrets
-(Settings → Secrets and variables → Actions):
+### 2. OAuth KV
 
-- `CLOUDFLARE_API_TOKEN`: API token with permission to deploy Workers
-- `CLOUDFLARE_ACCOUNT_ID`: Cloudflare account ID
+Workers OAuth Provider stores client registrations, grants, and token state in KV.
 
-`MCP_TOKEN` and `FLIGHTY_TOKEN` stay Worker secrets. They are not GitHub Actions secrets.
+```bash
+npx wrangler kv namespace create OAUTH_KV
+```
+
+Copy the namespace id into `kv_namespaces[0].id` (replace the zero id).
+
+### 3. Queue
+
+`wrangler deploy` creates the `flighty-mcp-sync` queue from `wrangler.jsonc`. The same
+Worker produces and consumes it (`max_concurrency` 1, one message at a time). No
+separate create command is required.
+
+### 4. Custom domain
+
+`wrangler.jsonc` contains:
+
+```jsonc
+{ "pattern": "flight-mcp.odell.io", "custom_domain": true }
+```
+
+Deploy creates the DNS record and certificate on the `odell.io` zone. The canonical
+MCP URL is `https://flight-mcp.odell.io/mcp`.
+
+### 5. Cloudflare Access for SaaS (OIDC)
+
+This follows [Secure MCP servers with Access](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/)
+and the [remote-mcp-cf-access](https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-cf-access)
+example. The Worker is an OAuth 2.1 authorization server for MCP clients and an OAuth
+client of Access.
+
+1. Create a [Zero Trust organization](https://developers.cloudflare.com/cloudflare-one/setup/) if you do not have one.
+2. Configure an identity provider (One-time PIN or your IdP) that the owner can use.
+3. In the [Cloudflare dashboard](https://dash.cloudflare.com/), go to **Zero Trust → Access controls → Applications → Create new application**.
+4. Choose **SaaS**, enter a name such as `Flighty MCP`, select the custom name that appears, and choose **OIDC**.
+5. Add the application.
+6. Under **Scopes**, include **openid**, **email**, and **profile**. The Worker requires the email claim.
+7. Under **Redirect URLs**, add `https://flight-mcp.odell.io/callback`. For local `wrangler dev`, also add `http://localhost:8787/callback`.
+8. Copy these values. They are Access for SaaS endpoints, not your upstream IdP's endpoints.
+
+   | Worker secret | Access for SaaS field |
+   | --- | --- |
+   | `ACCESS_CLIENT_ID` | Client ID |
+   | `ACCESS_CLIENT_SECRET` | Client secret |
+   | `ACCESS_TOKEN_URL` | Token endpoint |
+   | `ACCESS_AUTHORIZATION_URL` | Authorization endpoint |
+   | `ACCESS_JWKS_URL` | Key endpoint |
+
+   The endpoints look like `https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client id>/{token,authorization,jwks}`.
+9. Optional: enable refresh tokens so the owner is not sent through Access on every token refresh.
+10. **Access policy (only the owner).** Applications deny by default. Add one Allow policy:
+    - Action: **Allow**
+    - Include: **Emails** → the owner's email address
+    - Do not add an everyone / emails-ending-in rule
+11. Select the identity provider the owner uses. Save.
+
+Set the same email as the Worker secret `ACCESS_ALLOWED_EMAIL`. The Access policy is
+what users hit at login. The Worker checks the ID token email again and refuses to
+issue an MCP token, or to serve `/mcp`, for anyone else. If the secret is unset, every
+login is refused.
+
+### 6. Worker secrets
+
+```bash
+npx wrangler secret put FLIGHTY_TOKEN
+npx wrangler secret put ACCESS_CLIENT_ID
+npx wrangler secret put ACCESS_CLIENT_SECRET
+npx wrangler secret put ACCESS_TOKEN_URL
+npx wrangler secret put ACCESS_AUTHORIZATION_URL
+npx wrangler secret put ACCESS_JWKS_URL
+openssl rand -hex 32 | npx wrangler secret put COOKIE_ENCRYPTION_KEY
+npx wrangler secret put ACCESS_ALLOWED_EMAIL
+```
+
+`COOKIE_ENCRYPTION_KEY` is the hex from `openssl rand -hex 32`. It encrypts the OAuth
+consent and upstream-state cookies. Do not commit any of these values.
+
+`MCP_TOKEN` is no longer read. After the Access cutover, remove the old secret:
+
+```bash
+npx wrangler secret delete MCP_TOKEN
+```
+
+Optional secret: `FLIGHTY_BUILD_TOKEN`.
+
+Non-secret vars stay in `wrangler.jsonc`:
+
+- `FLIGHTY_ALLOW_WRITES=true`
+- `FLIGHTY_ALLOW_ACCOUNT_DELETION=false`
+
+### 7. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+Or merge to `main` and let GitHub Actions apply migrations and deploy. The action
+needs repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+`FLIGHTY_TOKEN` and the Access secrets stay Worker secrets. They are not GitHub
+Actions secrets.
+
+`GET /health` does not require a login.
 
 ## Connecting a client
 
 | Setting | Value |
 | --- | --- |
-| Server URL | `https://flighty-mcp.<your-subdomain>.workers.dev/mcp` |
-| Header | `Authorization: Bearer <MCP_TOKEN>` |
-| Optional header | `X-Flighty-Token: <Flighty token>` |
+| Server URL | `https://flight-mcp.odell.io/mcp` |
+| Auth | OAuth 2.1. The client discovers `/.well-known/oauth-authorization-server`, may dynamically register at `/register`, and sends the user through Access. |
+| Optional header | `X-Flighty-Token: <Flighty token>` overrides `FLIGHTY_TOKEN` for that request |
 
 Claude Code:
 
 ```bash
-claude mcp add --transport http --scope user flighty https://flighty-mcp.<your-subdomain>.workers.dev/mcp --header "Authorization: Bearer <MCP_TOKEN>"
+claude mcp add --transport http --scope user flighty https://flight-mcp.odell.io/mcp
 ```
 
-Then ask **"Use Flighty to show my upcoming flights."**
+The first connection opens a browser. Approve the MCP client, then sign in with
+Access as the owner. There is no `Authorization: Bearer <MCP_TOKEN>` header.
 
-## 🔑 Get your Flighty token
+Then ask **"Use Flighty to show my upcoming flights."** If the cache is empty, ask it
+to call `refresh_cache` or wait for the hourly sync.
+
+## Get your Flighty token
 
 On your iPhone:
 
@@ -83,31 +198,40 @@ On your iPhone:
 The regular Settings → Help email usually includes only app logs. These steps
 were verified with Flighty 4.11.1; the shortcut may change.
 
-## ⚙️ Configuration
+## Configuration
 
 Non-secret settings are Worker vars (`vars` in `wrangler.jsonc` or the dashboard).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MCP_TOKEN` (secret) | none | Bearer token required on `/mcp` |
-| `FLIGHTY_TOKEN` (secret) | none | Flighty account credential; `X-Flighty-Token` overrides it |
-| `FLIGHTY_BUILD_TOKEN` (secret) | none | Optional app build token header |
+| `FLIGHTY_TOKEN` (secret) | none | Flighty account credential. `X-Flighty-Token` overrides it |
+| `ACCESS_CLIENT_ID` (secret) | none | Access for SaaS client id |
+| `ACCESS_CLIENT_SECRET` (secret) | none | Access for SaaS client secret |
+| `ACCESS_TOKEN_URL` (secret) | none | Access token endpoint |
+| `ACCESS_AUTHORIZATION_URL` (secret) | none | Access authorization endpoint |
+| `ACCESS_JWKS_URL` (secret) | none | Access key endpoint |
+| `COOKIE_ENCRYPTION_KEY` (secret) | none | OAuth cookie encryption key (`openssl rand -hex 32`) |
+| `ACCESS_ALLOWED_EMAIL` (secret) | none | Only this email may complete login or call `/mcp` |
 | `FLIGHTY_ALLOW_WRITES` | `true` | Set to `false` for read-only access |
 | `FLIGHTY_ALLOW_ACCOUNT_DELETION` | `false` | Separate account-deletion permission |
-| `FLIGHTY_CACHE_TTL` | `120` | Account cache lifetime in seconds |
+| `FLIGHTY_CACHE_TTL` | `120` | In-memory snapshot lifetime, used only when D1 is not bound |
+| `FLIGHTY_SYNC_PAGES_PER_RUN` | `1` | Sync pages decoded in one Worker invocation before the queue continues |
 | `FLIGHTY_TIMEOUT` | `60` | Upstream request timeout in seconds |
 | `FLIGHTY_MAX_PAGES` | `100` | Maximum pages per account sync |
 | `FLIGHTY_LOCALE` / `FLIGHTY_USER_AGENT` / `FLIGHTY_DEVICE_ID` | app defaults | Request header overrides |
+| `FLIGHTY_BUILD_TOKEN` (secret) | none | Optional app build token header |
 
-`GET /health` returns service status without authentication.
+Observability logs and traces are enabled in `wrangler.jsonc` at a sampling rate of 1,
+which fits a single-user Worker. Lower `observability.traces.head_sampling_rate` if
+trace volume grows.
 
-## 📡 API and tools
+## API and tools
 
 | Tools | What they do |
 | --- | --- |
-| `list_flights`, `sync_account`, `get_account_records` | Read flights, tickets, notes and account settings |
+| `list_flights`, `sync_account`, `get_account_records`, `refresh_cache` | Read the cached account. Responses include `cache_age_seconds` and `last_refreshed`. `refresh_cache` and `refresh: true` start a sync |
 | `search_flights`, `get_flight`, `poll_flight` | Search schedules and check flight details |
-| `search_airports`, `search_airlines`, `search_aircraft_types`, `search_metro_areas` | Resolve names and codes |
+| `search_airports`, `search_airlines`, `search_aircraft_types`, `search_metro_areas` | Resolve names and codes from the cache |
 | `get_schema`, `get_endpoint_catalog` | Explore supported routes and protobuf fields |
 | `subscribe_flight`, `delete_flight`, `set_flight_archived`, `set_flight_mine` | Track, remove and organize flights |
 | `update_ticket`, `set_flight_note`, `upsert_manual_flight` | Edit bookings, notes and manual flights |
@@ -121,7 +245,7 @@ and [API contracts](docs/api.md).
 Resources: `flighty://flights/{when}`, `flighty://account/{kind}` and
 `flighty://schema/{name}`. Account resources return up to 200 records; tools support pagination.
 
-## ⚠️ Upstream concerns
+## Upstream concerns
 
 - **Unofficial API:** New Flighty versions may require verifying protobuf
   definitions, routes, headers and the token-export shortcut.
@@ -131,26 +255,36 @@ Resources: `flighty://flights/{when}`, `flighty://account/{kind}` and
   sync actions. `update_ticket` merges current data before changing supplied fields.
 - **Ticket timestamps:** Flighty may reset `created` when a ticket is edited.
   `update_ticket` preserves other editable ticket values, not server-owned timestamps.
-- **Request pacing:** Repeated account refreshes reuse a complete snapshot for
-  60 seconds. Server quotas are undocumented; writes are never retried automatically.
+- **Request pacing:** Manual refreshes reuse a complete snapshot for 60 seconds.
+  The hourly cron refreshes the default `FLIGHTY_TOKEN` account. Writes enqueue a
+  refresh for that account. Server quotas are undocumented; writes are never retried
+  automatically.
 - **Credentials can change:** Account tokens may be rejected or revoked.
   An observed JWT without an expiry claim does not guarantee permanent access.
 
-## 🛠️ Local development
+## Local development
 
 ```bash
 npm install
 npm run typecheck
 npm test
-echo "MCP_TOKEN=local-test" > .dev.vars   # add FLIGHTY_TOKEN=... to hit the real API
-npm run dev
 ```
 
+Copy `.dev.vars.example` to `.dev.vars` and fill in secrets to hit Access and Flighty.
 Tests use synthetic fixtures with a mocked `fetch` and never reach Flighty.
 Protobuf messages are built at runtime from `src/data/schema.json` with
 [`@bufbuild/protobuf`](https://github.com/bufbuild/protobuf-es).
 
-## 📝 License
+```bash
+npm run dev
+```
+
+`wrangler dev` uses a local D1 and KV. Apply the migration locally with
+`npx wrangler d1 migrations apply flighty-mcp --local` if the dev session does not
+create the tables itself. OAuth resource metadata uses the dev origin, so the Access
+redirect URL must include `http://localhost:8787/callback`.
+
+## License
 
 [MIT](LICENSE) · Copyright (c) 2026 Cole Jelinek.
 

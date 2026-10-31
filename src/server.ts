@@ -8,7 +8,7 @@ import { FlightyClient, tokenSubject, uuidText } from './client.js';
 import { VERSION, WEBSOCKET_URL } from './config.js';
 import { ENDPOINTS, catalog, pathKeys } from './endpoints.js';
 import { FlightyError } from './errors.js';
-import { FlightyService, cacheInfo, isDate } from './service.js';
+import { FlightyService, isDate } from './service.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const LOCAL: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -24,7 +24,8 @@ const INSTRUCTIONS =
   'Do not delete, import, link accounts, register devices or submit bulk changes without a specific request. ' +
   'Never ask for bearer tokens in tool arguments; credentials arrive through Worker secrets or request headers. ' +
   'Omitted optional mutation fields may clear existing values; use update_ticket to preserve known fields. ' +
-  'Rate limits are undocumented. Use the account cache and avoid polling unnecessarily.';
+  'Rate limits are undocumented. Read tools serve the D1 account cache; call refresh_cache to sync. ' +
+  'The hourly job and refresh_cache fetch one sync page per invocation. Avoid polling.';
 
 const jsonObject = () => z.record(z.string(), z.any());
 const stringMap = () => z.record(z.string(), z.string());
@@ -71,7 +72,7 @@ export function createServer(resolveToken: () => string): McpServer {
 
   tool(
     'list_flights',
-    'List this account\'s current flights, including archived history and manual flights. Excludes server deletion markers and other owners\' flight records. mine_only keeps flights marked My Flights; false also includes flights this account tracks. Date filters are YYYY-MM-DD in the departure airport\'s local timezone. Airport filters accept IATA, name or ID text. Sorted by departure time, earliest first. Pagination is local after a complete, cached, bodyless account sync. limit 1..200. details=true also includes the full decoded user-flight record.',
+    'List this account\'s current flights from the cached snapshot, including archived history, manual flights, and flights this account tracks. Excludes server deletion markers and other owners\' flight records. mine_only keeps flights marked My Flights. Date filters are YYYY-MM-DD in the departure airport\'s local timezone. Airport filters accept IATA, name or ID text. Sorted by departure time, earliest first. The cache object includes cache_age_seconds and last_refreshed. refresh=true starts a sync; within 60 seconds it reuses the last complete snapshot. limit 1..200. details=true also includes the full decoded user-flight record. If the cache is empty, call refresh_cache.',
     z.object({
       when: z.enum(['all', 'upcoming', 'past']).default('all'),
       mine_only: z.boolean().default(false),
@@ -91,19 +92,18 @@ export function createServer(resolveToken: () => string): McpServer {
 
   tool(
     'sync_account',
-    'Download all account pages without submitting changes, returning counts and cache metadata. Uses POST /v1/sync/full with NO body on every page. Not the apply_changes tool. Repeated read refreshes within 60 seconds reuse the last complete snapshot. get_account_records exposes individual record categories after the download.',
+    'Refresh or report the cached account snapshot without submitting changes. Uses POST /v1/sync/full with NO body, one page per Worker invocation, continued by the sync queue. Not the apply_changes tool. Returns record counts, cache_age_seconds and last_refreshed. Repeated manual refreshes within 60 seconds reuse the last complete snapshot. get_account_records reads categories from the cache.',
     z.object({ refresh: z.boolean().default(true) }),
     READ,
-    async (input) => {
-      const snapshot = await api.snapshot(resolveToken(), { refresh: input.refresh });
-      return {
-        account_id: snapshot.accountId,
-        counts: Object.fromEntries(Object.entries(snapshot.records).map(([kind, items]) => [kind, items.length])),
-        cache: cacheInfo(snapshot),
-        writes_enabled: api.settings.allowWrites,
-        account_deletion_enabled: api.settings.allowAccountDeletion,
-      };
-    },
+    (input) => service.refreshCache(resolveToken(), { refresh: input.refresh }),
+  );
+
+  tool(
+    'refresh_cache',
+    'Sync the Flighty account into the cache and return status, record counts, cache_age_seconds and last_refreshed. Read tools serve this cache instead of downloading the account on every call. A manual refresh within 60 seconds reports refresh_limited and does not call Flighty again. The default account continues page-by-page through the sync queue so a full sync is not held in Worker memory. The hourly cron starts the same refresh.',
+    z.object({}),
+    READ,
+    () => service.refreshCache(resolveToken(), { refresh: true }),
   );
 
   tool(

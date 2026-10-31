@@ -39,9 +39,13 @@ replacement account or a list of desired flights. No `changes` field is sent.
 
 `SyncResponseProto` contains `data[]` and `pagination { nextUrl, moreData }`.
 Only query parameters from `nextUrl` are copied onto the fixed sync path, as
-the app does. All pages must complete before caching. Read refreshes within 60 seconds reuse
-the last complete snapshot. Cycles, missing cursors,
-page limits, response limits or schema failures abort without caching partial data.
+the app does. When D1 is bound, each page is decoded, trimmed, and written
+before the next page is fetched, and reads are served from the last published
+generation. A manual refresh within 60 seconds reuses that generation. The
+hourly cron and `refresh_cache` continue a refresh one page per invocation.
+Cycles, missing cursors, page limits, response limits or schema failures abort
+without publishing a partial generation. Without D1, the process keeps one
+in-memory snapshot and still decodes a single page at a time.
 
 The stream includes reference catalogs, other accessible users, updates and
 pre-existing deletion markers. Flight identity is **(userId, flightId)**, not
@@ -168,14 +172,16 @@ FlightyWebsocketsClientMessage { registerSession { tokens: [<bearer>] } }
 FlightyWebsocketsServerMessage { requestSync {} }
 ```
 
-`wait_for_sync` waits once (maximum 30 seconds) and invalidates the local cache on
-requestSync. It does not write account data or subscribe to flights. Its protocol
+`wait_for_sync` waits once (maximum 30 seconds) and marks the account cache dirty on
+requestSync. With D1, that enqueues a refresh for the default `FLIGHTY_TOKEN`
+account. It does not write account data or subscribe to flights. Its protocol
 is mocked in the automated suite; it has not been used to validate mutations.
 
 ## Confidence and limitations
 
-- The runtime preserves unknown response fields in memory but does not expose them
-  as decoded JSON. `unknown_fields_present` / cache metadata reports that condition.
+- Unknown response fields are detected on the parsed message and are not copied
+  into the cached JSON. `schema_unknown_fields_present` reports that condition.
+  The protobuf message is dropped before the next sync page is fetched.
   Unknown/new fields require an updated schema; a successful parse is not proof
   every field is supported.
 - ProtoJSON may omit scalar defaults, such as false booleans. Summaries apply

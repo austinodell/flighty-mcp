@@ -1,8 +1,11 @@
 /** Flighty API transport, read-only sync, bounded per-credential cache and edits. */
 import * as proto from './proto.js';
 import { API_BASE, MIN_SYNC_INTERVAL, loadSettings, type Settings } from './config.js';
+import { getEnv } from './env.js';
 import { ENDPOINTS, pathKeys } from './endpoints.js';
 import { FlightyError, WritesDisabled } from './errors.js';
+import { extractSyncRecords, type SyncRecord } from './records.js';
+import { AccountStore, type AccountDatabase } from './store.js';
 
 type Json = Record<string, any>;
 
@@ -40,6 +43,14 @@ export function tokenSubject(token: string): string {
   }
 }
 
+export async function tokensMatch(left: string, right: string): Promise<boolean> {
+  const [a, b] = await Promise.all([sha256(left), sha256(right)]);
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return mismatch === 0;
+}
+
 export function utcNow(): string {
   return new Date().toISOString();
 }
@@ -58,7 +69,7 @@ export function timestamp(value: unknown): number {
   throw new FlightyError('Expected an RFC3339 timestamp with a timezone.');
 }
 
-async function sha256(text: string): Promise<string> {
+export async function sha256(text: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
@@ -115,8 +126,28 @@ export class FlightyClient {
     this.settings = settings ?? loadSettings();
   }
 
+  repository(): AccountStore | null {
+    const db = getEnv().DB as AccountDatabase | undefined;
+    return db ? new AccountStore(db) : null;
+  }
+
+  /** Queue a refresh for the default FLIGHTY_TOKEN account. Other credentials cannot be stored on the queue. */
+  async enqueueSync(message: { op: 'start' | 'continue'; force?: boolean }, token: string): Promise<boolean> {
+    const env = getEnv();
+    const queue = env.SYNC_QUEUE as { send(body: { op: 'start' | 'continue'; force?: boolean }): Promise<unknown> } | undefined;
+    const expected = typeof env.FLIGHTY_TOKEN === 'string' ? env.FLIGHTY_TOKEN : '';
+    if (!queue || !expected || !await tokensMatch(token, expected)) return false;
+    await queue.send(message);
+    return true;
+  }
+
   async invalidate(token: string): Promise<void> {
     CACHE.delete(await sha256(token));
+    const store = this.repository();
+    if (!store) return;
+    const accountId = tokenSubject(token);
+    await store.markDirty(accountId);
+    await this.enqueueSync({ op: 'start', force: true }, token);
   }
 
   requireWrites(): void {
@@ -317,6 +348,97 @@ export class FlightyClient {
     }
   }
 
+  /**
+   * Fetch and decode a single sync page. The protobuf message and raw bytes are
+   * not retained; only redacted records are returned so the next page can be fetched
+   * without holding the previous page's copies.
+   */
+  async fetchSyncPage(token: string, cursor: string | null, seen: Set<string>): Promise<{
+    records: SyncRecord[];
+    unknownFields: boolean;
+    more: boolean;
+    nextCursor: string | null;
+  }> {
+    let query: [string, string][] | undefined;
+    if (cursor) {
+      if (cursor.length > 16384) {
+        throw new FlightyError('Flighty pagination loop or oversized cursor; incomplete download was not cached.');
+      }
+      const id = await sha256(cursor);
+      if (seen.has(id) || seen.has(cursor)) {
+        throw new FlightyError('Flighty pagination loop or oversized cursor; incomplete download was not cached.');
+      }
+      seen.add(id);
+      // Match the app: copy query items; never request a server-supplied host/path.
+      const queryString: string = cursor.includes('?') ? cursor.slice(cursor.indexOf('?') + 1).split('#')[0] : '';
+      query = [...new URLSearchParams(queryString)];
+      if (!query.length) {
+        throw new FlightyError('Flighty pagination cursor has no query; incomplete download was not cached.');
+      }
+    }
+    const endpoint = ENDPOINTS.sync_account;
+    const route = endpoint.path;
+    const url = new URL(API_BASE + route);
+    if (query) url.search = new URLSearchParams(query).toString();
+    let bytes = new Uint8Array();
+    try {
+      const response = await fetch(url, {
+        method: endpoint.method,
+        headers: this.headers(token),
+        redirect: 'manual',
+        signal: AbortSignal.timeout(this.settings.timeout * 1000),
+      });
+      if (response.status < 200 || response.status >= 300) {
+        await response.body?.cancel();
+        const retry = response.headers.get('retry-after') ?? '';
+        const suffix = /^\d+$/.test(retry) ? ` Retry after ${retry} seconds.` : '';
+        if (response.status === 429) throw new FlightyError('Flighty API rate limit reached.' + suffix);
+        if (response.status === 401 || response.status === 403) {
+          throw new FlightyError(`Flighty API rejected authentication/access (${response.status}). Check account and app build tokens.`);
+        }
+        throw new FlightyError(`Flighty API returned HTTP ${response.status} for sync_account; request was not retried.`);
+      }
+      const contentType = (response.headers.get('content-type') ?? '').split(';')[0].trim();
+      if (!['application/x-protobuf', 'application/protobuf', 'application/octet-stream'].includes(contentType)) {
+        await response.body?.cancel();
+        throw new FlightyError('Flighty returned an unexpected response content type.');
+      }
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      if (response.body) {
+        const reader = response.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > this.settings.maxResponseBytes) {
+            await reader.cancel();
+            throw new FlightyError('Flighty response exceeded the configured size limit.');
+          }
+          chunks.push(value);
+        }
+      }
+      bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+    } catch (error) {
+      if (error instanceof FlightyError) throw error;
+      throw new FlightyError('Flighty API network/TLS request failed; it was not retried.');
+    }
+    const decoded = bytes.length ? proto.decodeReleased('SyncResponseProto', bytes) : { value: {}, unknownFields: false };
+    const records = extractSyncRecords(decoded.value, (previous, next) => timestamp(previous) > timestamp(next));
+    const pagination: Json = decoded.value.pagination ?? {};
+    const more = Boolean(pagination.moreData);
+    const nextCursor = more ? pagination.nextUrl : null;
+    if (more && (typeof nextCursor !== 'string' || !nextCursor)) {
+      throw new FlightyError('Flighty omitted its next-page cursor; incomplete download was not cached.');
+    }
+    return { records, unknownFields: decoded.unknownFields, more, nextCursor: more ? nextCursor : null };
+  }
+
   private async download(token: string): Promise<Snapshot> {
     const accountId = tokenSubject(token);
     const records: Record<string, Map<string, Json>> = {};
@@ -324,38 +446,15 @@ export class FlightyClient {
     const seen = new Set<string>();
     let unknown = false;
     for (let page = 1; page <= this.settings.maxPages; page++) {
-      let query: [string, string][] | undefined;
-      if (cursor) {
-        if (seen.has(cursor) || cursor.length > 16384) {
-          throw new FlightyError('Flighty pagination loop or oversized cursor; incomplete download was not cached.');
-        }
-        seen.add(cursor);
-        // Match the app: copy query items; never request a server-supplied host/path.
-        const queryString: string = cursor.includes('?') ? cursor.slice(cursor.indexOf('?') + 1).split('#')[0] : '';
-        query = [...new URLSearchParams(queryString)];
-        if (!query.length) {
-          throw new FlightyError('Flighty pagination cursor has no query; incomplete download was not cached.');
-        }
+      const batch = await this.fetchSyncPage(token, cursor, seen);
+      unknown ||= batch.unknownFields;
+      for (const record of batch.records) {
+        const bucket = (records[record.kind] ??= new Map());
+        const previous = bucket.get(record.recordKey);
+        if (previous?.updated && record.updated && timestamp(previous.updated) > timestamp(record.updated)) continue;
+        bucket.set(record.recordKey, record.payload);
       }
-      const result = await this.request('sync_account', token, { params: query });
-      unknown ||= Boolean(result.meta.unknown_fields_present);
-      const payload: Json = result.data;
-      for (const wrapper of payload.data ?? []) {
-        for (const [kind, item] of Object.entries<any>(wrapper)) {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-          // ID alone is insufficient: friend records can share the same flight ID.
-          let key: string;
-          if (item.id) key = JSON.stringify([String(item.userId ?? ''), String(item.id)]);
-          else if (item.flightId) key = JSON.stringify([String(item.userId ?? ''), String(item.flightId)]);
-          else key = JSON.stringify(sortKeys(item));
-          const bucket = (records[kind] ??= new Map());
-          const previous = bucket.get(key);
-          if (previous?.updated && item.updated && timestamp(previous.updated) > timestamp(item.updated)) continue;
-          bucket.set(key, item);
-        }
-      }
-      const pagination: Json = payload.pagination ?? {};
-      if (!pagination.moreData) {
+      if (!batch.more) {
         return new Snapshot(
           accountId,
           Object.fromEntries(Object.entries(records).map(([kind, items]) => [kind, [...items.values()]])),
@@ -365,10 +464,8 @@ export class FlightyClient {
           unknown,
         );
       }
-      cursor = pagination.nextUrl;
-      if (typeof cursor !== 'string' || !cursor) {
-        throw new FlightyError('Flighty omitted its next-page cursor; incomplete download was not cached.');
-      }
+      cursor = batch.nextCursor;
+      if (page === this.settings.maxPages) break;
     }
     throw new FlightyError('Flighty pagination exceeded max-pages; incomplete download was not cached.');
   }
@@ -427,14 +524,6 @@ export class FlightyClient {
       meta: result.meta,
     };
   }
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((k) => [k, sortKeys((value as Json)[k])]));
-  }
-  return value;
 }
 
 /** Test hook: drop all cached snapshots in this isolate. */

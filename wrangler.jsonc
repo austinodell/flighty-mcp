@@ -4,13 +4,68 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": true,
+  // Public MCP URL is https://flight-mcp.odell.io/mcp. OAuth tokens are bound to
+  // the request origin, so this is the hostname registered with Access.
+  "workers_dev": false,
   "minify": true,
+  "routes": [
+    { "pattern": "flight-mcp.odell.io", "custom_domain": true }
+  ],
   "vars": {
     "FLIGHTY_ALLOW_WRITES": "true",
     "FLIGHTY_ALLOW_ACCOUNT_DELETION": "false"
+  },
+  // Replace database_id after `npx wrangler d1 create flighty-mcp`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "flighty-mcp",
+      "database_id": "00000000-0000-4000-8000-00000000d1d1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Replace id after `npx wrangler kv namespace create OAUTH_KV`.
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "SYNC_QUEUE", "queue": "flighty-mcp-sync" }
+    ],
+    "consumers": [
+      {
+        "queue": "flighty-mcp-sync",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 5,
+        "visibility_timeout_ms": 120000
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 1 }
+  },
+  "secrets": {
+    "required": [
+      "FLIGHTY_TOKEN",
+      "ACCESS_CLIENT_ID",
+      "ACCESS_CLIENT_SECRET",
+      "ACCESS_TOKEN_URL",
+      "ACCESS_AUTHORIZATION_URL",
+      "ACCESS_JWKS_URL",
+      "COOKIE_ENCRYPTION_KEY",
+      "ACCESS_ALLOWED_EMAIL"
+    ]
   }
-  // Secrets (dashboard or `wrangler secret put`, never in this file):
-  // MCP_TOKEN, FLIGHTY_TOKEN, optional FLIGHTY_BUILD_TOKEN
-  // Optional vars: FLIGHTY_LOCALE, FLIGHTY_USER_AGENT, FLIGHTY_DEVICE_ID, FLIGHTY_TIMEOUT, FLIGHTY_CACHE_TTL, FLIGHTY_MAX_PAGES
+  // Optional secrets: FLIGHTY_BUILD_TOKEN
+  // Optional vars: FLIGHTY_LOCALE, FLIGHTY_USER_AGENT, FLIGHTY_DEVICE_ID, FLIGHTY_TIMEOUT, FLIGHTY_CACHE_TTL, FLIGHTY_MAX_PAGES, FLIGHTY_SYNC_PAGES_PER_RUN
+  // MCP_TOKEN is no longer read. Delete it with `npx wrangler secret delete MCP_TOKEN` after cutover.
 }

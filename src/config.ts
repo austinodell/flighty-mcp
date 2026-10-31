@@ -7,7 +7,8 @@ export const API_BASE = 'https://api.flightyapp.com';
 export const WEBSOCKET_URL = 'https://websockets.flightyapp.com/ws';
 export const MIN_SYNC_INTERVAL = 60;
 export const USER_AGENT = 'Flighty 4.11.1 (4818) com.flightyapp.flighty';
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
+export const MCP_RESOURCE_ORIGIN = 'https://flight-mcp.odell.io';
 
 export interface Settings {
   buildToken: string;
@@ -21,6 +22,7 @@ export interface Settings {
   maxPages: number;
   maxResponseBytes: number;
   maxCacheAccounts: number;
+  syncPagesPerRun: number;
 }
 
 function readEnv(name: string): string {
@@ -62,8 +64,9 @@ export function loadSettings(): Settings {
     maxPages: envNumber('FLIGHTY_MAX_PAGES', 100, true),
     maxResponseBytes: 32 * 1024 * 1024,
     maxCacheAccounts: 8,
+    syncPagesPerRun: envNumber('FLIGHTY_SYNC_PAGES_PER_RUN', 1, true),
   };
-  if (settings.timeout <= 0 || settings.cacheTtl < 0 || settings.maxPages < 1 || settings.maxPages > 1000) {
+  if (settings.timeout <= 0 || settings.cacheTtl < 0 || settings.maxPages < 1 || settings.maxPages > 1000 || settings.syncPagesPerRun < 1) {
     throw new FlightyError('Timeout/max-pages must be positive and cache TTL nonnegative.');
   }
   for (const value of [settings.deviceId, settings.locale, settings.userAgent]) {

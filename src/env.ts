@@ -1,5 +1,9 @@
+export interface SyncQueueMessage {
+  op: 'start' | 'continue';
+  force?: boolean;
+}
+
 export interface Env {
-  MCP_TOKEN: string;
   FLIGHTY_TOKEN?: string;
   FLIGHTY_BUILD_TOKEN?: string;
   FLIGHTY_DEVICE_ID?: string;
@@ -10,6 +14,18 @@ export interface Env {
   FLIGHTY_TIMEOUT?: string;
   FLIGHTY_CACHE_TTL?: string;
   FLIGHTY_MAX_PAGES?: string;
+  FLIGHTY_SYNC_PAGES_PER_RUN?: string;
+  MCP_RESOURCE?: string;
+  DB?: D1Database;
+  OAUTH_KV?: KVNamespace;
+  SYNC_QUEUE?: Queue<SyncQueueMessage>;
+  ACCESS_CLIENT_ID?: string;
+  ACCESS_CLIENT_SECRET?: string;
+  ACCESS_TOKEN_URL?: string;
+  ACCESS_AUTHORIZATION_URL?: string;
+  ACCESS_JWKS_URL?: string;
+  COOKIE_ENCRYPTION_KEY?: string;
+  ACCESS_ALLOWED_EMAIL?: string;
   [k: string]: unknown;
 }
 let _env: Env | null = null;

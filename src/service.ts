@@ -1,8 +1,10 @@
 /** Account views and common flight edits over the API client. */
 import * as proto from './proto.js';
-import { FlightyClient, Snapshot, timestamp, uuidText } from './client.js';
+import { FlightyClient, Snapshot, timestamp, tokenSubject, utcNow, uuidText } from './client.js';
 import { MIN_SYNC_INTERVAL } from './config.js';
 import { FlightyError } from './errors.js';
+import { runSyncJob, type SyncJob } from './refresh.js';
+import { viewFromMeta, type AccountStore, type CacheMeta, type CacheView } from './store.js';
 
 type Json = Record<string, any>;
 
@@ -81,13 +83,44 @@ export function flightSummary(record: Json, snapshot: Snapshot, manual = false):
 }
 
 export function cacheInfo(snapshot: Snapshot): Json {
+  const age = Math.max(0, Math.round((Date.now() - snapshot.storedAt) / 1000));
   return {
     fetched_at: snapshot.fetchedAt,
+    last_refreshed: snapshot.fetchedAt,
     pages: snapshot.pages,
     minimum_refresh_interval_seconds: MIN_SYNC_INTERVAL,
     refresh_limited: snapshot.refreshLimited,
     schema_unknown_fields_present: snapshot.unknownFields,
+    cache_age_seconds: age,
+    status: 'ready',
+    source: 'memory',
   };
+}
+
+function cacheFromView(view: CacheView): Json {
+  return {
+    fetched_at: view.last_refreshed,
+    last_refreshed: view.last_refreshed,
+    pages: view.pages,
+    pages_done: view.pages_done,
+    minimum_refresh_interval_seconds: MIN_SYNC_INTERVAL,
+    refresh_limited: view.refresh_limited,
+    schema_unknown_fields_present: view.schema_unknown_fields_present,
+    cache_age_seconds: view.cache_age_seconds,
+    status: view.status,
+    source: 'd1',
+    continuation: view.continuation,
+    last_error: view.last_error,
+  };
+}
+
+function catalogIds(record: Json, manual: boolean): { airports: string[]; airlines: string[] } {
+  const flight: Json = manual ? record : record.flight ?? {};
+  const departure: Json = flight.departure ?? {};
+  const arrival: Json = flight.arrival ?? {};
+  const airports = [departure.airportId, arrival.actualAirportId, arrival.scheduledAirportId].filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const airlines = [flight.airlineId].filter((id): id is string => typeof id === 'string' && id.length > 0);
+  return { airports, airlines };
 }
 
 export function isDate(value: string): boolean {
@@ -114,6 +147,83 @@ export interface ListFlightsOptions {
 export class FlightyService {
   constructor(public client: FlightyClient) {}
 
+  private store(): AccountStore | null {
+    return this.client.repository();
+  }
+
+  private async readyMeta(store: AccountStore, token: string): Promise<CacheMeta> {
+    const accountId = tokenSubject(token);
+    const meta = await store.read(accountId);
+    if (!meta || meta.generation < 1) {
+      throw new FlightyError(meta?.status === 'refreshing'
+        ? 'Account cache refresh is in progress. Call refresh_cache again after it finishes.'
+        : 'Account cache is empty. Call refresh_cache or wait for the hourly sync.');
+    }
+    return meta;
+  }
+
+  async refreshCache(token: string, opts: { refresh?: boolean; force?: boolean; complete?: boolean } = {}): Promise<Json> {
+    const store = this.store();
+    const settings = this.client.settings;
+    if (!store) {
+      const snapshot = await this.client.snapshot(token, { refresh: opts.refresh !== false, freshForWrite: Boolean(opts.force) });
+      const cache = cacheInfo(snapshot);
+      return {
+        account_id: snapshot.accountId,
+        status: 'ready',
+        counts: Object.fromEntries(Object.entries(snapshot.records).map(([kind, items]) => [kind, items.length])),
+        last_refreshed: snapshot.fetchedAt,
+        cache_age_seconds: cache.cache_age_seconds,
+        pages: snapshot.pages,
+        pages_done: snapshot.pages,
+        refresh_limited: snapshot.refreshLimited,
+        schema_unknown_fields_present: snapshot.unknownFields,
+        continuation: 'complete',
+        cache,
+        writes_enabled: settings.allowWrites,
+        account_deletion_enabled: settings.allowAccountDeletion,
+      };
+    }
+    const accountId = tokenSubject(token);
+    if (opts.refresh === false) {
+      await store.ensure(accountId);
+      const meta = await store.read(accountId);
+      const view = viewFromMeta(meta!);
+      return {
+        ...view,
+        cache: cacheFromView(view),
+        writes_enabled: settings.allowWrites,
+        account_deletion_enabled: settings.allowAccountDeletion,
+      };
+    }
+    const job: SyncJob = { op: 'start', force: opts.force };
+    let view = await runSyncJob({
+      client: this.client,
+      store,
+      token,
+      op: job.op,
+      force: job.force,
+      pages: opts.complete ? settings.maxPages : settings.syncPagesPerRun,
+    });
+    if (view.more && !view.already_running && !view.refresh_limited) {
+      const queued = opts.complete ? false : await this.client.enqueueSync({ op: 'continue' }, token);
+      if (queued) view = { ...view, continuation: 'queued' };
+      else {
+        view = await runSyncJob({ client: this.client, store, token, op: 'continue', pages: settings.maxPages });
+        if (opts.complete && view.more) {
+          await store.fail(accountId, 'Flighty pagination exceeded max-pages; incomplete download was not cached.', true);
+          throw new FlightyError('Flighty pagination exceeded max-pages; incomplete download was not cached.');
+        }
+      }
+    }
+    return {
+      ...view,
+      cache: cacheFromView(view),
+      writes_enabled: settings.allowWrites,
+      account_deletion_enabled: settings.allowAccountDeletion,
+    };
+  }
+
   async listFlights(token: string, opts: ListFlightsOptions = {}): Promise<Json> {
     const { when = 'all', mine_only = false, archived = null, origin, destination, start_date, end_date, limit = 50, offset = 0, refresh = false, details = false } = opts;
     if (!['all', 'upcoming', 'past'].includes(when) || !(limit >= 1 && limit <= 200) || offset < 0) {
@@ -123,7 +233,8 @@ export class FlightyService {
       if (date && !isDate(date)) throw new FlightyError('Dates must use YYYY-MM-DD.');
     }
     if (start_date && end_date && start_date > end_date) throw new FlightyError('start_date must not follow end_date.');
-    const snapshot = await this.client.snapshot(token, { refresh });
+    const loaded = await this.flightSnapshot(token, refresh);
+    const snapshot = loaded.snapshot;
     const normal: [Json, boolean][] = [
       ...snapshot.owned('remoteUserFlight').map((record): [Json, boolean] => [record, false]),
       ...snapshot.owned('remoteUserManualFlight').map((record): [Json, boolean] => [record, true]),
@@ -160,8 +271,44 @@ export class FlightyService {
       limit,
       next_offset: offset + limit < found.length ? offset + limit : null,
       flights: page,
-      cache: cacheInfo(snapshot),
+      cache: loaded.cache,
     };
+  }
+
+  private async flightSnapshot(token: string, refresh: boolean): Promise<{ snapshot: Snapshot; cache: Json }> {
+    const store = this.store();
+    if (!store) {
+      const snapshot = await this.client.snapshot(token, { refresh });
+      return { snapshot, cache: cacheInfo(snapshot) };
+    }
+    const refreshed = refresh ? await this.refreshCache(token, { refresh: true }) : null;
+    const meta = await this.readyMeta(store, token);
+    const flights = await store.payloads(meta.account_id, meta.generation, 'remoteUserFlight', { userId: meta.account_id });
+    const manuals = await store.payloads(meta.account_id, meta.generation, 'remoteUserManualFlight', { userId: meta.account_id });
+    const airportIds: string[] = [];
+    const airlineIds: string[] = [];
+    for (const record of flights) {
+      const ids = catalogIds(record, false);
+      airportIds.push(...ids.airports);
+      airlineIds.push(...ids.airlines);
+    }
+    for (const record of manuals) {
+      const ids = catalogIds(record, true);
+      airportIds.push(...ids.airports);
+      airlineIds.push(...ids.airlines);
+    }
+    const airports = await store.payloadsByIds(meta.account_id, meta.generation, 'remoteAirport', airportIds);
+    const airlines = await store.payloadsByIds(meta.account_id, meta.generation, 'remoteAirline', airlineIds);
+    const snapshot = new Snapshot(
+      meta.account_id,
+      { remoteUserFlight: flights, remoteUserManualFlight: manuals, remoteAirport: airports, remoteAirline: airlines },
+      meta.pages,
+      meta.fetched_at ?? utcNow(),
+      meta.stored_at ?? Date.now(),
+      meta.unknown_fields,
+    );
+    snapshot.refreshLimited = Boolean(refreshed?.refresh_limited);
+    return { snapshot, cache: cacheFromView(viewFromMeta(meta, { refresh_limited: snapshot.refreshLimited })) };
   }
 
   async accountRecords(token: string, kind: string, opts: { limit?: number; offset?: number; refresh?: boolean } = {}): Promise<Json> {
@@ -170,6 +317,22 @@ export class FlightyService {
     const kinds = definition.kind === 'message' ? definition.fields.map((f) => f.json_name) : [];
     if (!kinds.includes(kind) || !(limit >= 1 && limit <= 200) || offset < 0) {
       throw new FlightyError('Invalid record kind/limit/offset. Use get_schema(\'SyncResponseData\') for kinds.');
+    }
+    const store = this.store();
+    if (store) {
+      let refreshLimited = false;
+      if (refresh) refreshLimited = Boolean((await this.refreshCache(token, { refresh: true })).refresh_limited);
+      const meta = await this.readyMeta(store, token);
+      const owned = ['remoteUserFlight', 'remoteUserManualFlight'].includes(kind);
+      const page = await store.pagePayloads(meta.account_id, meta.generation, kind, offset, limit, owned ? meta.account_id : undefined);
+      const view = viewFromMeta(meta, { refresh_limited: refreshLimited });
+      return {
+        kind,
+        total: page.total,
+        records: page.records,
+        next_offset: offset + limit < page.total ? offset + limit : null,
+        cache: cacheFromView(view),
+      };
     }
     const snapshot = await this.client.snapshot(token, { refresh });
     const records = ['remoteUserFlight', 'remoteUserManualFlight'].includes(kind) ? snapshot.owned(kind) : snapshot.items(kind);
@@ -185,6 +348,23 @@ export class FlightyService {
   async searchCatalog(token: string, kind: string, query: string, limit = 20): Promise<Json> {
     if (!['remoteAirport', 'remoteAirline', 'remoteAircraftType', 'remoteMetroArea'].includes(kind) || !(limit >= 1 && limit <= 100)) {
       throw new FlightyError('Unsupported catalog or limit.');
+    }
+    const store = this.store();
+    if (store) {
+      const meta = await this.readyMeta(store, token);
+      const rows = await store.payloads(meta.account_id, meta.generation, kind);
+      const needle = query.trim().toLowerCase();
+      const keys = ['id', 'name', 'iata', 'icao', 'city', 'country', 'modelName'];
+      const matches = rows.filter((item) => keys.map((key) => String(item[key] ?? '')).join(' ').toLowerCase().includes(needle));
+      matches.sort((a, b) => {
+        const ea = String(a.iata ?? '').toLowerCase() !== needle ? 1 : 0;
+        const eb = String(b.iata ?? '').toLowerCase() !== needle ? 1 : 0;
+        if (ea !== eb) return ea - eb;
+        const na = String(a.name ?? '');
+        const nb = String(b.name ?? '');
+        return na < nb ? -1 : na > nb ? 1 : 0;
+      });
+      return { total: matches.length, results: matches.slice(0, limit), cache: cacheFromView(viewFromMeta(meta)) };
     }
     const snapshot = await this.client.snapshot(token);
     const needle = query.trim().toLowerCase();
@@ -209,10 +389,19 @@ export class FlightyService {
     if (!keys.length || keys.some((k) => !allowed.has(k)) || Object.values(fields).some((v) => v === null || v === undefined)) {
       throw new FlightyError('Supply non-null ticket fields: pnr, seatNumber, seatPosition, cabinClass, flightReason.');
     }
-    const snapshot = await this.client.snapshot(token, { refresh: true, freshForWrite: true });
-    const tickets = snapshot.items('remoteTicket').filter(
-      (item) => item.flightId === flightId && (item.userId ?? snapshot.accountId) === snapshot.accountId,
-    );
+    const store = this.store();
+    let tickets: Json[];
+    if (store) {
+      await this.refreshCache(token, { force: true, complete: true });
+      const meta = await this.readyMeta(store, token);
+      const rows = await store.payloads(meta.account_id, meta.generation, 'remoteTicket', { flightId });
+      tickets = rows.filter((item) => (item.userId ?? meta.account_id) === meta.account_id);
+    } else {
+      const snapshot = await this.client.snapshot(token, { refresh: true, freshForWrite: true });
+      tickets = snapshot.items('remoteTicket').filter(
+        (item) => item.flightId === flightId && (item.userId ?? snapshot.accountId) === snapshot.accountId,
+      );
+    }
     const payload: Json = Object.fromEntries(Object.entries(tickets[0] ?? {}).filter(([key]) => allowed.has(key)));
     Object.assign(payload, structuredClone(fields));
     payload.flightId = flightId;
