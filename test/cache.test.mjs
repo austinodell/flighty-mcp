@@ -152,7 +152,7 @@ test('MCP bearer token is not an authentication path', () => {
   const index = readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
   const wrangler = readFileSync(path.join(repoRoot, 'wrangler.jsonc'), 'utf8');
   assert.equal(index.includes('MCP_TOKEN'), false);
-  assert.match(wrangler, /flight-mcp\.odell\.io/);
+  assert.match(wrangler, /flighty-mcp\.odell\.io/);
   assert.match(wrangler, /"custom_domain": true/);
   assert.match(wrangler, /"crons": \["0 \* \* \* \*"\]/);
   assert.match(wrangler, /"traces": \{ "enabled": true/);

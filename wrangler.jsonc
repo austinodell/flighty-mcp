@@ -5,12 +5,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Public MCP URL is https://flight-mcp.odell.io/mcp. OAuth tokens are bound to
+  // Public MCP URL is https://flighty-mcp.odell.io/mcp. OAuth tokens are bound to
   // the request origin, so this is the hostname registered with Access.
   "workers_dev": false,
   "minify": true,
   "routes": [
-    { "pattern": "flight-mcp.odell.io", "custom_domain": true }
+    { "pattern": "flighty-mcp.odell.io", "custom_domain": true }
   ],
   "vars": {
     "FLIGHTY_ALLOW_WRITES": "true",

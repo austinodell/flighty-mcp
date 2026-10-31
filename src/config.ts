@@ -8,7 +8,7 @@ export const WEBSOCKET_URL = 'https://websockets.flightyapp.com/ws';
 export const MIN_SYNC_INTERVAL = 60;
 export const USER_AGENT = 'Flighty 4.11.1 (4818) com.flightyapp.flighty';
 export const VERSION = '0.3.0';
-export const MCP_RESOURCE_ORIGIN = 'https://flight-mcp.odell.io';
+export const MCP_RESOURCE_ORIGIN = 'https://flighty-mcp.odell.io';
 
 export interface Settings {
   buildToken: string;
