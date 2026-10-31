@@ -3,7 +3,7 @@
 An unofficial MCP server for [Flighty](https://flighty.com), hosted as a remote MCP server on
 Cloudflare Workers. Forked from [swiftyspiffy/flighty-mcp](https://github.com/swiftyspiffy/flighty-mcp).
 
-Clients connect to `https://flight-mcp.odell.io/mcp` and sign in with Cloudflare Access.
+Clients connect to `https://flighty-mcp.odell.io/mcp` and sign in with Cloudflare Access.
 The Worker does not accept a static `MCP_TOKEN` bearer. `FLIGHTY_TOKEN` is still the upstream
 Flighty credential. A client may send `X-Flighty-Token` to use a different Flighty account
 than the one in that secret.
@@ -78,11 +78,11 @@ Namespace `flighty-mcp-oauth` already exists (`014b53be447d41b293d9b4bf74af63bb`
 `wrangler.jsonc` contains:
 
 ```jsonc
-{ "pattern": "flight-mcp.odell.io", "custom_domain": true }
+{ "pattern": "flighty-mcp.odell.io", "custom_domain": true }
 ```
 
 Deploy creates the DNS record and certificate on the `odell.io` zone. The canonical
-MCP URL is `https://flight-mcp.odell.io/mcp`.
+MCP URL is `https://flighty-mcp.odell.io/mcp`.
 
 ### 5. Cloudflare Access for SaaS (OIDC)
 
@@ -97,7 +97,7 @@ client of Access.
 4. Choose **SaaS**, enter a name such as `Flighty MCP`, select the custom name that appears, and choose **OIDC**.
 5. Add the application.
 6. Under **Scopes**, include **openid**, **email**, and **profile**. The Worker requires the email claim.
-7. Under **Redirect URLs**, add `https://flight-mcp.odell.io/callback`. For local `wrangler dev`, also add `http://localhost:8787/callback`.
+7. Under **Redirect URLs**, add `https://flighty-mcp.odell.io/callback`. For local `wrangler dev`, also add `http://localhost:8787/callback`.
 8. Copy these values. They are Access for SaaS endpoints, not your upstream IdP's endpoints.
 
    | Worker secret | Access for SaaS field |
@@ -171,14 +171,14 @@ Actions secrets.
 
 | Setting | Value |
 | --- | --- |
-| Server URL | `https://flight-mcp.odell.io/mcp` |
+| Server URL | `https://flighty-mcp.odell.io/mcp` |
 | Auth | OAuth 2.1. The client discovers `/.well-known/oauth-authorization-server`, may dynamically register at `/register`, and sends the user through Access. |
 | Optional header | `X-Flighty-Token: <Flighty token>` overrides `FLIGHTY_TOKEN` for that request |
 
 Claude Code:
 
 ```bash
-claude mcp add --transport http --scope user flighty https://flight-mcp.odell.io/mcp
+claude mcp add --transport http --scope user flighty https://flighty-mcp.odell.io/mcp
 ```
 
 The first connection opens a browser. Approve the MCP client, then sign in with
