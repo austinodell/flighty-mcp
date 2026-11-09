@@ -5,10 +5,12 @@ import { z } from 'zod';
 
 import * as proto from './proto.js';
 import { FlightyClient, tokenSubject, uuidText } from './client.js';
-import { VERSION, WEBSOCKET_URL } from './config.js';
+import { WEBSOCKET_URL } from './config.js';
+import { getEnv } from './env.js';
 import { ENDPOINTS, catalog, pathKeys } from './endpoints.js';
 import { FlightyError } from './errors.js';
 import { FlightyService, isDate } from './service.js';
+import { appVersion, serverInfo } from './version.js';
 
 const READ: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const LOCAL: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -35,6 +37,15 @@ function toolArgs(schema: { shape: unknown }) {
   return schema.shape as any;
 }
 
+/** The request's env, or null when no request has set it (tests). */
+function currentEnv() {
+  try {
+    return getEnv();
+  } catch {
+    return null;
+  }
+}
+
 function text(value: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }] };
 }
@@ -42,7 +53,7 @@ function text(value: unknown) {
 export function createServer(resolveToken: () => string): McpServer {
   const api = new FlightyClient();
   const service = new FlightyService(api);
-  const server = new McpServer({ name: 'flighty', version: VERSION }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'flighty', version: appVersion(currentEnv()) }, { instructions: INSTRUCTIONS });
 
   const tool = <S extends z.ZodObject<any>>(
     name: string,
@@ -60,6 +71,14 @@ export function createServer(resolveToken: () => string): McpServer {
     z.object({ name: z.string().default('') }),
     LOCAL,
     (input) => proto.describe(input.name),
+  );
+
+  tool(
+    'get_server_info',
+    'Which version of flighty-mcp is running and when that Worker version was deployed. Use it to check that a release is live. This tool performs no network requests.',
+    z.object({}),
+    LOCAL,
+    () => serverInfo(currentEnv()),
   );
 
   tool(
