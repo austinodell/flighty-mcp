@@ -160,12 +160,26 @@ Non-secret vars stay in `wrangler.jsonc`:
 npx wrangler deploy
 ```
 
-Or merge to `main` and let GitHub Actions apply migrations and deploy. The action
+Or merge to `main` and let GitHub Actions test, release, apply migrations and deploy
+(see [Releases](#releases)). The action
 needs repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 `FLIGHTY_TOKEN` and the Access secrets stay Worker secrets. They are not GitHub
 Actions secrets.
 
 `GET /health` does not require a login.
+
+## Releases
+
+Releasing is automatic, using [semantic-release](https://semantic-release.gitbook.io) and [Conventional Commits](https://www.conventionalcommits.org) (config in `.releaserc.json`), the same as `imessage-mcp`. Pull requests run **Test**. On each push to `main`, **Deploy Worker** runs the tests, then semantic-release reads the commits since the latest `vX.Y.Z` tag:
+
+| Commit | Release |
+|---|---|
+| `feat: …` | minor |
+| `fix: …`, `perf: …`, `revert: …`, `deps: …` | patch |
+| `feat!: …` (any type with `!`), or `BREAKING CHANGE:` in the body | major |
+| `docs:`, `chore:`, `ci:`, `test:`, `refactor:`, anything else | none |
+
+A release creates the `vX.Y.Z` tag and a GitHub Release with notes grouped by type. The Worker deploys on every push either way, with `git describe` passed as `APP_VERSION` (`0.4.0` right after a release, `0.4.0-3-gabc1234` for unreleased commits). `/health`, the MCP handshake and `get_server_info` report it. A plain `npx wrangler deploy` reports `0.0.0-development`. Nothing is committed to `main`; the committed `package.json` version stays `0.0.0-development` and the tags are the source of truth. **Give PRs a Conventional title**, such as `feat: add get_server_info`. A squash merge uses the title as the commit message, and for a "Merge pull request #N" commit semantic-release reads the title on the line after it.
 
 ## Connecting a client
 
@@ -241,6 +255,7 @@ trace volume grows.
 | `search_flights`, `get_flight`, `poll_flight` | Search schedules and check flight details |
 | `search_airports`, `search_airlines`, `search_aircraft_types`, `search_metro_areas` | Resolve names and codes from the cache |
 | `get_schema`, `get_endpoint_catalog` | Explore supported routes and protobuf fields |
+| `get_server_info` | Running version and when that Worker version was deployed |
 | `subscribe_flight`, `delete_flight`, `set_flight_archived`, `set_flight_mine` | Track, remove and organize flights |
 | `update_ticket`, `set_flight_note`, `upsert_manual_flight` | Edit bookings, notes and manual flights |
 | `apply_changes` | Advanced access to all 43 sync actions |

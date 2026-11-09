@@ -3,7 +3,8 @@ import OAuthProvider, { type OAuthHelpers } from '@cloudflare/workers-oauth-prov
 
 import { handleAccessRequest } from './access-handler.js';
 import { validateToken } from './client.js';
-import { MCP_RESOURCE_ORIGIN, VERSION, secretEnv } from './config.js';
+import { MCP_RESOURCE_ORIGIN, secretEnv } from './config.js';
+import { appVersion } from './version.js';
 import { setEnv, type Env, type SyncQueueMessage } from './env.js';
 import { FlightyError } from './errors.js';
 import { ownerAllowed } from './owner.js';
@@ -84,7 +85,7 @@ export default {
     setEnv(env);
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
-    if (url.pathname === '/health') return Response.json({ status: 'ok', service: 'flighty-mcp', version: `${VERSION}-workers` });
+    if (url.pathname === '/health') return Response.json({ status: 'ok', service: 'flighty-mcp', version: appVersion(env) });
     return providerFor(url.origin).fetch(request, env, ctx);
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

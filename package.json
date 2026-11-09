@@ -1,6 +1,6 @@
 {
   "name": "flighty-mcp",
-  "version": "0.3.0",
+  "version": "0.0.0-development",
   "type": "module",
   "private": true,
   "scripts": {
@@ -18,7 +18,13 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "semantic-release": "^25.0.9",
     "typescript": "^5",
     "wrangler": "^4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/austinodell/flighty-mcp.git"
   }
 }

@@ -23,6 +23,7 @@ const { FlightyService } = await import(`${base}/service.js`);
 const { loadSettings } = await import(`${base}/config.js`);
 const { ENDPOINTS } = await import(`${base}/endpoints.js`);
 const { FlightyError, WritesDisabled } = await import(`${base}/errors.js`);
+const { appVersion, serverInfo } = await import(`${base}/version.js`);
 
 // Synthetic fixtures only. Unmocked upstream fetches fail.
 const OWNER = '00000000-0000-4000-8000-000000000001';
@@ -546,4 +547,20 @@ test('update_ticket preserves editable fields and drops server metadata', async 
   await new FlightyService(writer()).updateTicket(TOKEN, FLIGHT, { seatNumber: '2B' });
   const sent = proto.decode('SyncRequestProto', calls.at(-1).body).changes[0].ticketInfoAction;
   assert.deepEqual(sent, { flightId: FLIGHT, pnr: 'ABC123', seatNumber: '2B', cabinClass: 'ECONOMY' });
+});
+
+test('appVersion uses APP_VERSION from the deploy and falls back to the development version', () => {
+  assert.equal(appVersion({ APP_VERSION: '0.4.0' }), '0.4.0');
+  assert.equal(appVersion({ APP_VERSION: '0.4.0-3-gabc1234' }), '0.4.0-3-gabc1234');
+  assert.equal(appVersion({ APP_VERSION: ' ' }), '0.0.0-development');
+  assert.equal(appVersion({}), '0.0.0-development');
+  assert.equal(appVersion(null), '0.0.0-development');
+});
+
+test('serverInfo adds the Worker version id and deploy time when the binding exists', () => {
+  assert.deepEqual(serverInfo({}), { name: 'flighty-mcp', version: '0.0.0-development' });
+  assert.deepEqual(
+    serverInfo({ APP_VERSION: '0.4.0', CF_VERSION_METADATA: { id: 'abc', tag: '', timestamp: '2026-11-09T22:00:00.000Z' } }),
+    { name: 'flighty-mcp', version: '0.4.0', worker_version_id: 'abc', deployed_at: '2026-11-09T22:00:00.000Z' },
+  );
 });
