@@ -1,13 +1,11 @@
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import OAuthProvider, { type OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 
-import { handleAccessRequest } from './access-handler.js';
+import { verifyAccessRequest } from './access-auth.js';
 import { validateToken } from './client.js';
-import { MCP_RESOURCE_ORIGIN, secretEnv } from './config.js';
+import { secretEnv } from './config.js';
 import { appVersion } from './version.js';
 import { setEnv, type Env, type SyncQueueMessage } from './env.js';
 import { FlightyError } from './errors.js';
-import { ownerAllowed } from './owner.js';
 import { handleScheduled, handleSyncMessage } from './schedule.js';
 import { createServer } from './server.js';
 
@@ -41,55 +39,22 @@ async function handleMcp(request: Request): Promise<Response> {
   return new Response(res.body, { status: res.status, headers });
 }
 
-const apiHandler = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
     setEnv(env);
-    const email = (ctx.props as { email?: string } | undefined)?.email;
-    if (!ownerAllowed(email, env.ACCESS_ALLOWED_EMAIL)) {
-      console.error(JSON.stringify({ message: 'owner_check_failed' }));
-      return Response.json({ error: 'Forbidden' }, { status: 403, headers: cors });
+    const url = new URL(request.url);
+    if (url.pathname === '/health') return Response.json({ status: 'ok', service: 'flighty-mcp', version: appVersion(env) });
+    if (url.pathname !== '/mcp') return new Response('Not found', { status: 404 });
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+    // Cloudflare Access authenticates the caller before the Worker runs. Re-check its signed JWT here.
+    const access = await verifyAccessRequest(request, env);
+    if (!access.ok) {
+      return Response.json({ jsonrpc: '2.0', error: { code: -32000, message: access.reason }, id: null }, { status: access.status, headers: cors });
     }
     return handleMcp(request);
   },
-};
-
-const defaultHandler = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> | Response {
-    setEnv(env);
-    return handleAccessRequest(request, env as Env & { OAUTH_PROVIDER: OAuthHelpers }, ctx);
-  },
-};
-
-const providers = new Map<string, OAuthProvider<Env>>();
-
-/** Tokens are bound to the origin the client called, so local dev and the custom domain each get a resource URL. */
-export function providerFor(origin: string): OAuthProvider<Env> {
-  const existing = providers.get(origin);
-  if (existing) return existing;
-  const provider = new OAuthProvider<Env>({
-    apiRoute: '/mcp',
-    apiHandler,
-    defaultHandler,
-    authorizeEndpoint: '/authorize',
-    tokenEndpoint: '/token',
-    clientRegistrationEndpoint: '/register',
-    scopesSupported: ['openid', 'email', 'profile'],
-    resourceMetadata: { resource: `${origin}/mcp`, resource_name: 'Flighty' },
-  });
-  providers.set(origin, provider);
-  return provider;
-}
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    setEnv(env);
-    const url = new URL(request.url);
-    if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
-    if (url.pathname === '/health') return Response.json({ status: 'ok', service: 'flighty-mcp', version: appVersion(env) });
-    return providerFor(url.origin).fetch(request, env, ctx);
-  },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(handleScheduled(env, (bound) => providerFor(MCP_RESOURCE_ORIGIN).purgeExpiredData(bound)));
+    ctx.waitUntil(handleScheduled(env));
   },
   async queue(batch: MessageBatch<SyncQueueMessage>, env: Env): Promise<void> {
     for (const message of batch.messages) {

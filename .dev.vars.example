@@ -1,9 +1,6 @@
 # Copy to .dev.vars. Do not commit .dev.vars.
 FLIGHTY_TOKEN=
-ACCESS_CLIENT_ID=
-ACCESS_CLIENT_SECRET=
-ACCESS_TOKEN_URL=
-ACCESS_AUTHORIZATION_URL=
-ACCESS_JWKS_URL=
-COOKIE_ENCRYPTION_KEY=
-ACCESS_ALLOWED_EMAIL=
+# Audience (AUD) tag of the self-hosted Access application for flighty-mcp.odell.io.
+# Requests must also carry an Access-issued Cf-Access-Jwt-Assertion header, so test
+# authenticated calls against the deployed hostname.
+ACCESS_AUD=

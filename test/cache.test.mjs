@@ -23,8 +23,6 @@ const { FlightyService } = await import(`${base}/service.js`);
 const { loadSettings } = await import(`${base}/config.js`);
 const { runSyncJob } = await import(`${base}/refresh.js`);
 const { AccountStore } = await import(`${base}/store.js`);
-const { ownerAllowed } = await import(`${base}/owner.js`);
-const { verifyAccessIdToken } = await import(`${base}/access-handler.js`);
 const { handleScheduled, handleSyncMessage } = await import(`${base}/schedule.js`);
 
 const OWNER = '00000000-0000-4000-8000-000000000001';
@@ -140,14 +138,6 @@ test.beforeEach(() => {
   mockFetch([]);
 });
 
-test('owner allowlist fails closed', () => {
-  assert.equal(ownerAllowed('Owner@Example.com', 'owner@example.com'), true);
-  assert.equal(ownerAllowed('other@example.com', 'owner@example.com'), false);
-  assert.equal(ownerAllowed('owner@example.com', ''), false);
-  assert.equal(ownerAllowed('', 'owner@example.com'), false);
-  assert.equal(ownerAllowed(undefined, undefined), false);
-});
-
 test('MCP bearer token is not an authentication path', () => {
   const index = readFileSync(path.join(repoRoot, 'src/index.ts'), 'utf8');
   const wrangler = readFileSync(path.join(repoRoot, 'wrangler.jsonc'), 'utf8');
@@ -158,34 +148,9 @@ test('MCP bearer token is not an authentication path', () => {
   assert.match(wrangler, /"traces": \{ "enabled": true/);
   assert.match(wrangler, /flighty-mcp-sync/);
   assert.match(wrangler, /"binding": "DB"/);
-  assert.match(wrangler, /"binding": "OAUTH_KV"/);
-});
-
-test('access id token is verified and a bad signature is rejected', async () => {
-  const pair = await crypto.subtle.generateKey(
-    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
-    true,
-    ['sign', 'verify'],
-  );
-  const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  jwk.kid = 'test-key';
-  async function sign(payload) {
-    const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' }));
-    const body = b64url(JSON.stringify(payload));
-    const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(`${header}.${body}`));
-    return `${header}.${body}.${Buffer.from(signature).toString('base64url')}`;
-  }
-  const jwks = 'https://access.example/jwks';
-  mockFetch([['GET', jwks, () => Response.json({ keys: [jwk] })]]);
-  const claims = await verifyAccessIdToken(
-    { ACCESS_JWKS_URL: jwks },
-    await sign({ email: 'owner@example.com', sub: 'user-1', exp: Math.floor(Date.now() / 1000) + 600 }),
-  );
-  assert.equal(ownerAllowed(claims.email, 'owner@example.com'), true);
-  await assert.rejects(
-    verifyAccessIdToken({ ACCESS_JWKS_URL: jwks }, await sign({ email: 'owner@example.com', sub: 'user-1', exp: 1 })),
-    /expired/,
-  );
+  assert.equal(wrangler.includes("OAUTH_KV"), false);
+  assert.match(wrangler, /"ACCESS_TEAM_DOMAIN": "aodell\.cloudflareaccess\.com"/);
+  assert.match(wrangler, /"required": \[[^\]]*"ACCESS_AUD"/);
 });
 
 test('sync stores one page before fetching the next and reads do not sync again', async () => {

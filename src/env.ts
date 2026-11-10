@@ -15,17 +15,12 @@ export interface Env {
   FLIGHTY_CACHE_TTL?: string;
   FLIGHTY_MAX_PAGES?: string;
   FLIGHTY_SYNC_PAGES_PER_RUN?: string;
-  MCP_RESOURCE?: string;
   DB?: D1Database;
-  OAUTH_KV?: KVNamespace;
   SYNC_QUEUE?: Queue<SyncQueueMessage>;
-  ACCESS_CLIENT_ID?: string;
-  ACCESS_CLIENT_SECRET?: string;
-  ACCESS_TOKEN_URL?: string;
-  ACCESS_AUTHORIZATION_URL?: string;
-  ACCESS_JWKS_URL?: string;
-  COOKIE_ENCRYPTION_KEY?: string;
-  ACCESS_ALLOWED_EMAIL?: string;
+  /** Access team domain, e.g. aodell.cloudflareaccess.com (wrangler var). */
+  ACCESS_TEAM_DOMAIN?: string;
+  /** Audience (AUD) tag of the self-hosted Access application (Worker secret). */
+  ACCESS_AUD?: string;
   [k: string]: unknown;
 }
 let _env: Env | null = null;

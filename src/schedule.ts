@@ -1,4 +1,4 @@
-/** Hourly and queued account refresh. Kept separate from the OAuth entrypoint so tests can run it in Node. */
+/** Hourly and queued account refresh. Kept separate from the Worker entrypoint so tests can run it in Node. */
 import { FlightyClient } from './client.js';
 import { setEnv, type Env, type SyncQueueMessage } from './env.js';
 import { runSyncJob } from './refresh.js';
@@ -35,7 +35,7 @@ export async function handleSyncMessage(env: Env, message: SyncQueueMessage): Pr
   }));
 }
 
-export async function handleScheduled(env: Env, purge?: (env: Env) => Promise<unknown>): Promise<void> {
+export async function handleScheduled(env: Env): Promise<void> {
   setEnv(env);
   console.log(JSON.stringify({ message: 'cron_refresh' }));
   if (!env.FLIGHTY_TOKEN) {
@@ -52,11 +52,5 @@ export async function handleScheduled(env: Env, purge?: (env: Env) => Promise<un
       force: true,
       pages: client.settings.maxPages,
     });
-  }
-  if (!purge) return;
-  try {
-    await purge(env);
-  } catch (error) {
-    console.error(JSON.stringify({ message: 'oauth_purge_failed', error: error instanceof Error ? error.message : 'error' }));
   }
 }
