@@ -41,7 +41,6 @@ migrations, deploys, then deletes the unused `MCP_TOKEN` secret on every push to
 | Binding | Name | ID |
 | --- | --- | --- |
 | `DB` | `flighty-mcp` | `42bfcf77-8ba9-4c1a-b06b-fe443cf62cd1` |
-| `OAUTH_KV` | `flighty-mcp-oauth` | `014b53be447d41b293d9b4bf74af63bb` |
 | `SYNC_QUEUE` | `flighty-mcp-sync` | `199a638623e4490fabd771415783aa95` (bound by queue name) |
 
 `migrations/0001_account_cache.sql` is already applied remotely and recorded in
@@ -63,17 +62,12 @@ npx wrangler d1 create flighty-mcp
 npx wrangler d1 migrations apply flighty-mcp --remote
 ```
 
-### 2. OAuth KV
-
-Workers OAuth Provider stores client registrations, grants, and token state in KV.
-Namespace `flighty-mcp-oauth` already exists (`014b53be447d41b293d9b4bf74af63bb`).
-
-### 3. Queue
+### 2. Queue
 
 `flighty-mcp-sync` already exists. The Worker produces and consumes it
 (`max_concurrency` 1, one message at a time).
 
-### 4. Custom domain
+### 3. Custom domain
 
 `wrangler.jsonc` contains:
 
@@ -84,62 +78,33 @@ Namespace `flighty-mcp-oauth` already exists (`014b53be447d41b293d9b4bf74af63bb`
 Deploy creates the DNS record and certificate on the `odell.io` zone. The canonical
 MCP URL is `https://flighty-mcp.odell.io/mcp`.
 
-### 5. Cloudflare Access for SaaS (OIDC)
+### 4. Cloudflare Access (self-hosted application with Managed OAuth)
 
-This follows [Secure MCP servers with Access](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/)
-and the [remote-mcp-cf-access](https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-cf-access)
-example. The Worker is an OAuth 2.1 authorization server for MCP clients and an OAuth
-client of Access.
+Authentication is handled by Cloudflare Access, not by this Worker. Access runs the OAuth flow
+with MCP clients and forwards each request with a signed `Cf-Access-Jwt-Assertion` JWT, which the
+Worker verifies on every `/mcp` request (RS256 signature against the team's keys, issuer, audience
+and expiry). Who may connect is decided only by the Access policy. See
+[Secure MCP servers with Access](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/)
+and [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/).
 
-1. Create a [Zero Trust organization](https://developers.cloudflare.com/cloudflare-one/setup/) if you do not have one.
-2. Configure an identity provider (One-time PIN or your IdP) that the owner can use.
-3. In the [Cloudflare dashboard](https://dash.cloudflare.com/), go to **Zero Trust → Access controls → Applications → Create new application**.
-4. Choose **SaaS**, enter a name such as `Flighty MCP`, select the custom name that appears, and choose **OIDC**.
-5. Add the application.
-6. Under **Scopes**, include **openid**, **email**, and **profile**. The Worker requires the email claim.
-7. Under **Redirect URLs**, add `https://flighty-mcp.odell.io/callback`. For local `wrangler dev`, also add `http://localhost:8787/callback`.
-8. Copy these values. They are Access for SaaS endpoints, not your upstream IdP's endpoints.
+1. Go to **Zero Trust → Access controls → Applications → Add an application → Self-hosted**.
+2. Name it `flighty-mcp`, set the public hostname to `flighty-mcp.odell.io` (no path).
+3. Turn on **Managed OAuth** under Advanced settings.
+4. Add one **Allow** policy that includes the emails that may connect. No Bypass or Everyone rules.
+5. Copy the application's **Audience (AUD) tag**.
 
-   | Worker secret | Access for SaaS field |
-   | --- | --- |
-   | `ACCESS_CLIENT_ID` | Client ID |
-   | `ACCESS_CLIENT_SECRET` | Client secret |
-   | `ACCESS_TOKEN_URL` | Token endpoint |
-   | `ACCESS_AUTHORIZATION_URL` | Authorization endpoint |
-   | `ACCESS_JWKS_URL` | Key endpoint |
+### 5. Worker secrets
 
-   The endpoints look like `https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client id>/{token,authorization,jwks}`.
-9. Optional: enable refresh tokens so the owner is not sent through Access on every token refresh.
-10. **Access policy (only the owner).** Applications deny by default. Add one Allow policy:
-    - Action: **Allow**
-    - Include: **Emails** → the owner's email address
-    - Do not add an everyone / emails-ending-in rule
-11. Select the identity provider the owner uses. Save.
-
-Set the same email as the Worker secret `ACCESS_ALLOWED_EMAIL`. The Access policy is
-what users hit at login. The Worker checks the ID token email again and refuses to
-issue an MCP token, or to serve `/mcp`, for anyone else. If the secret is unset, every
-login is refused.
-
-### 6. Worker secrets
-
-`FLIGHTY_TOKEN`, `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_TOKEN_URL`,
-`ACCESS_AUTHORIZATION_URL`, `ACCESS_JWKS_URL`, `COOKIE_ENCRYPTION_KEY`, and
-`ACCESS_ALLOWED_EMAIL` are already set on the Worker. To rotate one:
+`FLIGHTY_TOKEN` and `ACCESS_AUD` are Worker secrets. To set or rotate one:
 
 ```bash
 npx wrangler secret put FLIGHTY_TOKEN
-npx wrangler secret put ACCESS_CLIENT_ID
-npx wrangler secret put ACCESS_CLIENT_SECRET
-npx wrangler secret put ACCESS_TOKEN_URL
-npx wrangler secret put ACCESS_AUTHORIZATION_URL
-npx wrangler secret put ACCESS_JWKS_URL
-openssl rand -hex 32 | npx wrangler secret put COOKIE_ENCRYPTION_KEY
-npx wrangler secret put ACCESS_ALLOWED_EMAIL
+npx wrangler secret put ACCESS_AUD
 ```
 
-`COOKIE_ENCRYPTION_KEY` is the hex from `openssl rand -hex 32`. It encrypts the OAuth
-consent and upstream-state cookies. Do not commit any of these values.
+`ACCESS_TEAM_DOMAIN` (`aodell.cloudflareaccess.com`) is a plain var in `wrangler.jsonc`.
+`wrangler deploy` stops if `ACCESS_AUD` is missing, and if either Access value is unset `/mcp`
+fails closed with a 500. Do not commit any of these values.
 
 `MCP_TOKEN` is no longer read. The deploy workflow runs `wrangler secret delete MCP_TOKEN` after a successful deploy and ignores a secret that is already gone. To remove it yourself:
 
@@ -154,7 +119,7 @@ Non-secret vars stay in `wrangler.jsonc`:
 - `FLIGHTY_ALLOW_WRITES=true`
 - `FLIGHTY_ALLOW_ACCOUNT_DELETION=false`
 
-### 7. Deploy
+### 6. Deploy
 
 ```bash
 npx wrangler deploy
@@ -186,7 +151,7 @@ A release creates the `vX.Y.Z` tag and a GitHub Release with notes grouped by ty
 | Setting | Value |
 | --- | --- |
 | Server URL | `https://flighty-mcp.odell.io/mcp` |
-| Auth | OAuth 2.1. The client discovers `/.well-known/oauth-authorization-server`, may dynamically register at `/register`, and sends the user through Access. |
+| Auth | Cloudflare Access Managed OAuth. The client discovers Access's OAuth endpoints from the `401` response and the user signs in through Access. |
 | Optional header | `X-Flighty-Token: <Flighty token>` overrides `FLIGHTY_TOKEN` for that request |
 
 Claude Code:
@@ -195,8 +160,7 @@ Claude Code:
 claude mcp add --transport http --scope user flighty https://flighty-mcp.odell.io/mcp
 ```
 
-The first connection opens a browser. Approve the MCP client, then sign in with
-Access as the owner. There is no `Authorization: Bearer <MCP_TOKEN>` header.
+The first connection opens a browser to sign in through Access. There is no `Authorization: Bearer <MCP_TOKEN>` header.
 
 Then ask **"Use Flighty to show my upcoming flights."** If the cache is empty, ask it
 to call `refresh_cache` or wait for the hourly sync.
@@ -227,13 +191,8 @@ Non-secret settings are Worker vars (`vars` in `wrangler.jsonc` or the dashboard
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `FLIGHTY_TOKEN` (secret) | none | Flighty account credential. `X-Flighty-Token` overrides it |
-| `ACCESS_CLIENT_ID` (secret) | none | Access for SaaS client id |
-| `ACCESS_CLIENT_SECRET` (secret) | none | Access for SaaS client secret |
-| `ACCESS_TOKEN_URL` (secret) | none | Access token endpoint |
-| `ACCESS_AUTHORIZATION_URL` (secret) | none | Access authorization endpoint |
-| `ACCESS_JWKS_URL` (secret) | none | Access key endpoint |
-| `COOKIE_ENCRYPTION_KEY` (secret) | none | OAuth cookie encryption key (`openssl rand -hex 32`) |
-| `ACCESS_ALLOWED_EMAIL` (secret) | none | Only this email may complete login or call `/mcp` |
+| `ACCESS_AUD` (secret) | none | Audience (AUD) tag of the Access application; `/mcp` rejects tokens for any other audience |
+| `ACCESS_TEAM_DOMAIN` | `aodell.cloudflareaccess.com` | Access team domain used to fetch signing keys and check the issuer |
 | `FLIGHTY_ALLOW_WRITES` | `true` | Set to `false` for read-only access |
 | `FLIGHTY_ALLOW_ACCOUNT_DELETION` | `false` | Separate account-deletion permission |
 | `FLIGHTY_CACHE_TTL` | `120` | In-memory snapshot lifetime, used only when D1 is not bound |
@@ -293,7 +252,7 @@ npm run typecheck
 npm test
 ```
 
-Copy `.dev.vars.example` to `.dev.vars` and fill in secrets to hit Access and Flighty.
+Copy `.dev.vars.example` to `.dev.vars` and fill in secrets to hit Flighty.
 Tests use synthetic fixtures with a mocked `fetch` and never reach Flighty.
 Protobuf messages are built at runtime from `src/data/schema.json` with
 [`@bufbuild/protobuf`](https://github.com/bufbuild/protobuf-es).
@@ -304,8 +263,7 @@ npm run dev
 
 `wrangler dev` uses a local D1 and KV. Apply the migration locally with
 `npx wrangler d1 migrations apply flighty-mcp --local` if the dev session does not
-create the tables itself. OAuth resource metadata uses the dev origin, so the Access
-redirect URL must include `http://localhost:8787/callback`.
+create the tables itself.  `/mcp` still requires an Access-issued JWT, so test authenticated calls against the deployed hostname.
 
 ## License
 
